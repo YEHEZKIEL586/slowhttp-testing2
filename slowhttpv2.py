@@ -29,6 +29,8 @@ import tempfile
 import platform
 import shutil
 import traceback
+import textwrap
+
 
 # Try to import optional dependencies
 try:
@@ -1108,43 +1110,42 @@ class SSHManager:
             return None
         try:
             cmd = textwrap.dedent("""\
-                /usr/bin/env bash -s <<'BASH'
-                set -e
-                export LC_ALL=C.UTF-8 LANG=C.UTF-8
-    
-                hostname_val=$(hostname)
-                os_val=$(awk -F= '/^PRETTY_NAME=/{print $2}' /etc/os-release | tr -d '"')
-                kernel_val=$(uname -r)
-                # cover Intel/AMD ("model name") dan ARM ("Processor")
-                cpu_val=$(awk -F: '/model name|Processor/ {print $2; exit}' /proc/cpuinfo | sed 's/^ *//')
-                cpu_cores_val=$(grep -c '^processor' /proc/cpuinfo || nproc)
-                mem_total_val=$(awk '/MemTotal:/ {printf "%.0f MiB", $2/1024}' /proc/meminfo)
-                mem_used_val=$(free -m | awk '/Mem:/ {printf "%d MiB", $3}')
-                disk_total_val=$(df -h / | awk 'NR==2{print $2}')
-                disk_used_val=$(df -h / | awk 'NR==2{print $3}')
-                python_ver_val=$(python3 --version 2>&1 || true)
-                uptime_val=$(uptime -p)
-    
-                printf '{'
-                printf '"hostname":"%s",' "$hostname_val"
-                printf '"os":"%s",' "$os_val"
-                printf '"kernel":"%s",' "$kernel_val"
-                printf '"cpu":"%s",' "$cpu_val"
-                printf '"cpu_cores":%s,' "$cpu_cores_val"
-                printf '"memory_total":"%s",' "$mem_total_val"
-                printf '"memory_used":"%s",' "$mem_used_val"
-                printf '"disk_total":"%s",' "$disk_total_val"
-                printf '"disk_used":"%s",' "$disk_used_val"
-                printf '"python_version":"%s",' "$python_ver_val"
-                printf '"uptime":"%s"' "$uptime_val"
-                printf '}\n'
-                BASH
+            /usr/bin/env bash -s <<'BASH'
+            set -e
+            export LC_ALL=C.UTF-8 LANG=C.UTF-8
+            
+            hostname_val=$(hostname)
+            os_val=$(awk -F= '/^PRETTY_NAME=/{print $2}' /etc/os-release | tr -d '"')
+            kernel_val=$(uname -r)
+            cpu_val=$(awk -F: '/model name|Processor/ {print $2; exit}' /proc/cpuinfo | sed 's/^ *//')
+            cpu_cores_val=$(grep -c '^processor' /proc/cpuinfo || nproc)
+            mem_total_val=$(awk '/MemTotal:/ {printf "%.0f MiB", $2/1024}' /proc/meminfo)
+            mem_used_val=$(free -m | awk '/Mem:/ {printf "%d MiB", $3}')
+            disk_total_val=$(df -h / | awk 'NR==2{print $2}')
+            disk_used_val=$(df -h / | awk 'NR==2{print $3}')
+            python_ver_val=$(python3 --version 2>&1 || true)
+            uptime_val=$(uptime -p)
+            
+            printf '{'
+            printf '"hostname":"%s",' "$hostname_val"
+            printf '"os":"%s",' "$os_val"
+            printf '"kernel":"%s",' "$kernel_val"
+            printf '"cpu":"%s",' "$cpu_val"
+            printf '"cpu_cores":%s,' "$cpu_cores_val"
+            printf '"memory_total":"%s",' "$mem_total_val"
+            printf '"memory_used":"%s",' "$mem_used_val"
+            printf '"disk_total":"%s",' "$disk_total_val"
+            printf '"disk_used":"%s",' "$disk_used_val"
+            printf '"python_version":"%s",' "$python_ver_val"
+            printf '"uptime":"%s"' "$uptime_val"
+            printf '}\n'
+            BASH
             """)
-            # pastikan newline Linux & ada newline terakhir
+            # Windows CRLF suka bikin heredoc halu
             cmd = cmd.replace('\r\n', '\n')
             if not cmd.endswith('\n'):
                 cmd += '\n'
-    
+            
             success, output = self.execute_command(ip, cmd, timeout=20)
             if not success:
                 return None
