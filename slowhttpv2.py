@@ -1110,23 +1110,39 @@ class SSHManager:
         
         try:
             # Create a command to gather system information
-            cmd = """
-            echo "{"
-            echo "  "hostname": "$(hostname)","
-            echo "  "os": "$(cat /etc/os-release | grep PRETTY_NAME | cut -d = -f 2 | tr -d ")","
-            echo "  "kernel": "$(uname -r)","
-            echo "  "cpu": "$(grep model name /proc/cpuinfo | head -1 | cut -d : -f 2 | xargs)","
-            echo "  "cpu_cores": $(grep -c processor /proc/cpuinfo),"
-            echo "  "memory_total": "$(free -h | grep Mem | awk {print $2})","
-            echo "  "memory_used": "$(free -h | grep Mem | awk {print $3})","
-            echo "  "disk_total": "$(df -h / | tail -1 | awk {print $2})","
-            echo "  "disk_used": "$(df -h / | tail -1 | awk {print $3})","
-            echo "  "python_version": "$(python3 --version 2>&1)","
-            echo "  "uptime": "$(uptime -p)""
-            echo "}"
-            """
+            cmd = r"""bash -s <<'BASH'
+            set -e
             
-            success, output = self.execute_command(ip, cmd)
+            hostname_val=$(hostname)
+            os_val=$(awk -F= '/^PRETTY_NAME=/{print $2}' /etc/os-release | tr -d '"')
+            kernel_val=$(uname -r)
+            cpu_val=$(awk -F: '/model name/ {print $2; exit}' /proc/cpuinfo | sed 's/^ *//')
+            cpu_cores_val=$(grep -c '^processor' /proc/cpuinfo || nproc)
+            mem_total_val=$(awk '/MemTotal:/ {printf "%.0f MiB", $2/1024}' /proc/meminfo)
+            mem_used_val=$(free -m | awk '/Mem:/ {printf "%d MiB", $3}')
+            disk_total_val=$(df -h / | awk 'NR==2{print $2}')
+            disk_used_val=$(df -h / | awk 'NR==2{print $3}')
+            python_ver_val=$(python3 --version 2>&1 || true)
+            uptime_val=$(uptime -p)
+            
+            # Print JSON aman pakai printf
+            printf '{'
+            printf '"hostname":"%s",' "$hostname_val"
+            printf '"os":"%s",' "$os_val"
+            printf '"kernel":"%s",' "$kernel_val"
+            printf '"cpu":"%s",' "$cpu_val"
+            printf '"cpu_cores":%s,' "$cpu_cores_val"
+            printf '"memory_total":"%s",' "$mem_total_val"
+            printf '"memory_used":"%s",' "$mem_used_val"
+            printf '"disk_total":"%s",' "$disk_total_val"
+            printf '"disk_used":"%s",' "$disk_used_val"
+            printf '"python_version":"%s",' "$python_ver_val"
+            printf '"uptime":"%s"' "$uptime_val"
+            printf '}\n'
+            BASH
+            """
+            success, output = self.execute_command(ip, cmd, timeout=20)
+
             if not success:
                 return None
             
