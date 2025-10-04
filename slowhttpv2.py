@@ -1235,7 +1235,6 @@ class SlowHTTPAttacker:
         self.connection_timeout = 5
         self.retry_delay = 0.5
         self.max_retry_attempts = 3
-        }
         
         # Generate random user agent if not provided
         if not user_agent:
