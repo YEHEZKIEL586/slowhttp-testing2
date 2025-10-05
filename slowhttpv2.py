@@ -3815,7 +3815,8 @@ class AttackManager:
             'ssl_exhaust': 'SSL Exhaustion',
             'tcp_flood': 'TCP Flood',
             'land': 'LAND Attack',
-            'dns_amplification': 'DNS Amplification'
+            'dns_amplification': 'DNS Amplification',
+            'cloudflare_bypass': 'Cloudflare Bypass Attack'
         }
     
     def launch_attack(self, session_id, target_url, attack_type, vps_list, parameters):
@@ -4005,9 +4006,10 @@ class AttackManager:
             if target_ip:
                 safe_target_ip = shlex.quote(target_ip)
                 cmd += f"--target-ip {safe_target_ip} "
-            if attack_type == "cloudflare_bypass":
-               # Cloudflare Bypass attack - no special parameters needed
-               cmd += "# Cloudflare Bypass: will attempt to discover origin IP and bypass protection "
+        
+        if attack_type == "cloudflare_bypass":
+            # Cloudflare Bypass attack - no special parameters needed
+            cmd += "# Cloudflare Bypass: will attempt to discover origin IP and bypass protection "
         
         # Redirect output to log file and run in background
         timestamp = int(time.time())
@@ -4834,7 +4836,7 @@ class SlowHTTPTUI:
             for i, (attack_id, attack_name) in enumerate(attack_methods.items(), 1):
                 print(f"{i}. {attack_name}")
             
-            attack_choice = self.terminal.input_with_prompt("Select attack method (1-8): ")
+            attack_choice = self.terminal.input_with_prompt("Select attack method (1-9): ")
             if not attack_choice or not attack_choice.isdigit():
                 return
             
@@ -4931,6 +4933,14 @@ class SlowHTTPTUI:
                     input("Press Enter to continue...")
                     return
                 parameters['target_ip'] = target_ip
+            
+            if attack_type == 'cloudflare_bypass':
+                print(f"\n{Colors.YELLOW}[INFO] Cloudflare Bypass Attack{Colors.RESET}")
+                print(f"{Colors.YELLOW}This attack will attempt to:{Colors.RESET}")
+                print(f"  1. Discover the origin IP behind Cloudflare")
+                print(f"  2. Perform cache poisoning attacks")
+                print(f"  3. Bypass Cloudflare protection mechanisms")
+                print(f"\n{Colors.YELLOW}Note: This attack may take longer to initialize{Colors.RESET}\n")
             
             # Confirm attack
             print(f"\n{Colors.BOLD}ATTACK SUMMARY:{Colors.RESET}")
@@ -5426,13 +5436,14 @@ class SlowHTTPTUI:
             menu = f"""
 {Colors.BOLD}AVAILABLE TOOLS:{Colors.RESET}
 {Colors.GREEN}[1]{Colors.RESET} DNS Lookup
-{Colors.GREEN}[2]{Colors.RESET} WAF Detection
-{Colors.GREEN}[3]{Colors.RESET} Port Scanner
-{Colors.GREEN}[4]{Colors.RESET} Cloudflare Detector
-{Colors.GREEN}[5]{Colors.RESET} SSL Information
+{Colors.GREEN}[2]{Colors.RESET} DNS History (Find Origin IPs)
+{Colors.GREEN}[3]{Colors.RESET} WAF Detection
+{Colors.GREEN}[4]{Colors.RESET} Port Scanner
+{Colors.GREEN}[5]{Colors.RESET} Cloudflare Detector
+{Colors.GREEN}[6]{Colors.RESET} SSL Information
 {Colors.GREEN}[0]{Colors.RESET} Back to Main Menu
 
-{Colors.YELLOW}Select option (0-5): {Colors.RESET}"""
+{Colors.YELLOW}Select option (0-6): {Colors.RESET}"""
             
             print(menu)
             choice = input().strip()
@@ -5440,12 +5451,14 @@ class SlowHTTPTUI:
             if choice == '1':
                 self.dns_lookup_tool()
             elif choice == '2':
-                self.waf_detection_tool()
+                self.dns_history_tool()
             elif choice == '3':
-                self.port_scanner_tool()
+                self.waf_detection_tool()
             elif choice == '4':
-                self.cloudflare_detector_tool()
+                self.port_scanner_tool()
             elif choice == '5':
+                self.cloudflare_detector_tool()
+            elif choice == '6':
                 self.ssl_info_tool()
             elif choice == '0':
                 break
@@ -5483,6 +5496,85 @@ class SlowHTTPTUI:
         except Exception as e:
             print(f"{Colors.RED}[ERROR] {str(e)}{Colors.RESET}")
             logger.error(f"Error in DNS lookup: {str(e)}")
+            logger.error(traceback.format_exc())
+        
+        input("\nPress Enter to continue...")
+    
+    def dns_history_tool(self):
+        """DNS History tool - Find historical IPs and subdomains"""
+        self.terminal.clear_screen()
+        print(f"{Colors.BOLD}DNS HISTORY & ORIGIN IP FINDER{Colors.RESET}")
+        print("=" * 50)
+        
+        domain = self.terminal.input_with_prompt("Enter domain name: ")
+        if not domain:
+            return
+        
+        # Remove protocol if present
+        if domain.startswith('http'):
+            parsed = urlparse(domain)
+            domain = parsed.hostname or parsed.netloc
+        
+        print(f"\n{Colors.YELLOW}[INFO] Searching DNS history for {domain}...{Colors.RESET}")
+        print(f"{Colors.YELLOW}[INFO] This may take a moment...{Colors.RESET}\n")
+        
+        try:
+            # Initialize DNS History Tool
+            dns_tool = DNSHistoryTool()
+            
+            # Get DNS history
+            dns_tool.get_dns_history(domain)
+            
+            # Display results
+            print(f"\n{Colors.BOLD}{'='*60}{Colors.RESET}")
+            print(f"{Colors.BOLD}  DNS HISTORY RESULTS{Colors.RESET}")
+            print(f"{Colors.BOLD}{'='*60}{Colors.RESET}\n")
+            
+            # Current IPs
+            if dns_tool.results['current_ips']:
+                print(f"{Colors.BOLD}CURRENT IPs:{Colors.RESET}")
+                for ip in dns_tool.results['current_ips']:
+                    is_cf = dns_tool.is_cloudflare_ip(ip)
+                    status = f"{Colors.RED}[Cloudflare]{Colors.RESET}" if is_cf else f"{Colors.GREEN}[Direct]{Colors.RESET}"
+                    print(f"  {ip} {status}")
+            
+            # Historical IPs
+            if dns_tool.results['historical_ips']:
+                print(f"\n{Colors.BOLD}HISTORICAL IPs:{Colors.RESET}")
+                for ip in dns_tool.results['historical_ips']:
+                    is_cf = dns_tool.is_cloudflare_ip(ip)
+                    status = f"{Colors.RED}[Cloudflare]{Colors.RESET}" if is_cf else f"{Colors.GREEN}[Direct]{Colors.RESET}"
+                    print(f"  {ip} {status}")
+            
+            # Non-Cloudflare IPs (Origin IPs)
+            if dns_tool.results['non_cloudflare_ips']:
+                print(f"\n{Colors.GREEN}{Colors.BOLD}ORIGIN IPs (Non-Cloudflare):{Colors.RESET}")
+                for ip in dns_tool.results['non_cloudflare_ips']:
+                    print(f"  {Colors.GREEN}{ip}{Colors.RESET}")
+                print(f"\n{Colors.GREEN}[SUCCESS] Found {len(dns_tool.results['non_cloudflare_ips'])} potential origin IP(s){Colors.RESET}")
+            else:
+                print(f"\n{Colors.YELLOW}[INFO] No non-Cloudflare IPs found{Colors.RESET}")
+            
+            # Subdomains
+            if dns_tool.results['subdomains']:
+                print(f"\n{Colors.BOLD}DISCOVERED SUBDOMAINS:{Colors.RESET}")
+                for subdomain in dns_tool.results['subdomains'][:20]:  # Show first 20
+                    print(f"  {subdomain}")
+                if len(dns_tool.results['subdomains']) > 20:
+                    print(f"  ... and {len(dns_tool.results['subdomains']) - 20} more")
+            
+            # DNS Records
+            if dns_tool.results['dns_records']:
+                print(f"\n{Colors.BOLD}DNS RECORDS:{Colors.RESET}")
+                for record_type, values in dns_tool.results['dns_records'].items():
+                    if values:
+                        print(f"  {record_type}: {', '.join(values)}")
+            
+            print(f"\n{Colors.BOLD}{'='*60}{Colors.RESET}\n")
+            
+        except Exception as e:
+            print(f"{Colors.RED}[ERROR] {str(e)}{Colors.RESET}")
+            logger.error(f"Error in DNS history lookup: {str(e)}")
             logger.error(traceback.format_exc())
         
         input("\nPress Enter to continue...")
